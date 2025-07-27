@@ -1,0 +1,23 @@
+# wasmer.toml
+[package]
+name = "your-username/my-fire-map" # You can edit this
+version = "0.1.0"
+description = "FIRMS Fire Propagation Map"
+
+[[module]]
+name = "app"
+source = "."
+abi = "wasi"
+
+[dependencies]
+python = "wasmer/python@0.1.0"
+
+[command.run]
+runner = "wasi/python@0.1.0"
+args = [
+    "-u",
+    "-m",
+    "gunicorn",
+    "app:server",
+    "--bind=0.0.0.0:${PORT}"
+]
