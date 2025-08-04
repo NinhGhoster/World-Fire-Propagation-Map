@@ -8,6 +8,13 @@ import types
 import numpy as np
 
 # Import MFF modules
+import sys
+import os
+
+# Add current directory and subdirectories to Python path
+current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, current_dir)
+
 try:
     import moving_firefighter_problem_generator.movingfp.gen as mfp
     from movingff_paper.get_D_value import start_recursion
@@ -52,8 +59,21 @@ def load_problem_from_json(problem_file):
     
     # Extract basic data
     n = problem_data['parameters']['n']
-    adjacency_matrix = np.array(problem_data['graph']['adjacency_matrix'])
-    distance_matrix = np.array(problem_data['graph']['distance_matrix'])
+    
+    # Convert adjacency matrix with proper data type handling
+    adj_data = problem_data['graph']['adjacency_matrix']
+    adjacency_matrix = np.array(adj_data, dtype=int)
+    
+    # Convert distance matrix with proper data type handling
+    dist_data = problem_data['graph']['distance_matrix']
+    # Handle "inf" strings and convert to float('inf')
+    def convert_distance_value(val):
+        if isinstance(val, str) and val == "inf":
+            return float('inf')
+        return float(val)
+    
+    distance_matrix = np.array([[convert_distance_value(val) for val in row] for row in dist_data])
+    
     burnt_nodes_list = problem_data['graph']['burnt_nodes']
     firefighter_stations = problem_data['graph'].get('firefighter_stations', [])
     
@@ -71,6 +91,24 @@ def load_problem_from_json(problem_file):
     grid_distance_matrix = np.array(distance_matrix)
     
     print(f"   📊 Distance matrix shape: {grid_distance_matrix.shape}")
+    print(f"   📊 Distance matrix dtype: {grid_distance_matrix.dtype}")
+    print(f"   📊 Adjacency matrix dtype: {adjacency_matrix.dtype}")
+    
+    # Check for any non-numeric values in adjacency matrix
+    if adjacency_matrix.dtype.kind not in 'iuf':  # integer, unsigned integer, float
+        print(f"   ⚠️  WARNING: Adjacency matrix has non-numeric dtype: {adjacency_matrix.dtype}")
+        print(f"   🔍 Sample adjacency values: {adjacency_matrix.flatten()[:10]}")
+    
+    # Check for any non-numeric values in distance matrix
+    if grid_distance_matrix.dtype.kind not in 'iuf':  # integer, unsigned integer, float
+        print(f"   ⚠️  WARNING: Distance matrix has non-numeric dtype: {grid_distance_matrix.dtype}")
+        print(f"   🔍 Sample distance values: {grid_distance_matrix.flatten()[:10]}")
+    
+    # Check for infinite values
+    inf_count = np.sum(np.isinf(grid_distance_matrix))
+    if inf_count > 0:
+        print(f"   📊 Found {inf_count} infinite values in distance matrix")
+    
     print(f"   📊 Distance range: min={np.min(grid_distance_matrix[grid_distance_matrix > 0]):.1f}, max={np.max(grid_distance_matrix[grid_distance_matrix < np.inf]):.1f}")
     
     # Validate adjacency matrix - check for impossible moves

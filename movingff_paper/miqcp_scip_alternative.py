@@ -39,6 +39,35 @@ def mfp_constraints_scip(D, B, n, graph, time=60, firefighters=1, firefighter_st
     try:
         print(f"burnt nodes in G_solver {graph.burnt_nodes}")
         
+        # Validate data types before proceeding
+        print(f"🔍 Validating graph data types...")
+        print(f"   • Adjacency matrix dtype: {graph.A.dtype}")
+        print(f"   • Distance matrix dtype: {graph.D.dtype}")
+        
+        # Ensure adjacency matrix contains only integers
+        if graph.A.dtype.kind not in 'iuf':
+            print(f"   ⚠️  Converting adjacency matrix to integer dtype")
+            graph.A = np.array(graph.A, dtype=int)
+        
+        # Ensure distance matrix contains only floats
+        if graph.D.dtype.kind not in 'iuf':
+            print(f"   ⚠️  Converting distance matrix to float dtype")
+            graph.D = np.array(graph.D, dtype=float)
+        
+        # Check for any string values in adjacency matrix
+        if graph.A.dtype.kind == 'U' or graph.A.dtype.kind == 'S':  # Unicode or byte string
+            print(f"   ❌ ERROR: Adjacency matrix contains string values!")
+            print(f"   🔍 Sample values: {graph.A.flatten()[:10]}")
+            raise ValueError("Adjacency matrix contains string values instead of integers")
+        
+        # Check for any string values in distance matrix
+        if graph.D.dtype.kind == 'U' or graph.D.dtype.kind == 'S':  # Unicode or byte string
+            print(f"   ❌ ERROR: Distance matrix contains string values!")
+            print(f"   🔍 Sample values: {graph.D.flatten()[:10]}")
+            raise ValueError("Distance matrix contains string values instead of floats")
+        
+        print(f"   ✅ Data type validation passed")
+        
         # Create SCIP model
         model = scip.Model("miqcp_firefighter")
         

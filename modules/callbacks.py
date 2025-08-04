@@ -258,6 +258,10 @@ def register_callbacks(app, api_key):
         Output('grid-toggle-state', 'data'),
         Output('grid-toggle-button', 'children'),
         Output('fire-map', 'figure', allow_duplicate=True),
+        Output('selected-firefighter-stations', 'data', allow_duplicate=True),
+        Output('latest-saved-file', 'data', allow_duplicate=True),
+        Output('save-graph-button', 'disabled', allow_duplicate=True),
+        Output('run-mff-button', 'disabled', allow_duplicate=True),
         Input('grid-toggle-button', 'n_clicks'),
         State('grid-toggle-state', 'data'),
         State('fire-map', 'figure'),
@@ -271,21 +275,35 @@ def register_callbacks(app, api_key):
     )
     def toggle_grid_graph(n_clicks, current_state, current_figure, country_code, selected_point, grid_graph_size, grid_spacing, map_zoom, selected_stations):
         if n_clicks is None:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
         
         new_state = not current_state
         button_text = "Hide Grid Graph" if new_state else "Show Grid Graph"
         
         # If no current figure or no country selected, just update the toggle state
         if not current_figure or not country_code:
-            return new_state, button_text, no_update
+            # Reset everything when grid is hidden
+            if not new_state:
+                return new_state, button_text, no_update, [], None, True, True
+            else:
+                return new_state, button_text, no_update, no_update, no_update, no_update, no_update
         
         # Get the current map data and layout
         existing_data = current_figure.get('data', [])
         current_layout = current_figure.get('layout', {})
         
-        # Create new figure with existing data
-        fig = go.Figure(data=existing_data)
+        # Filter out existing grid lines and firefighter stations to avoid duplication
+        filtered_data = []
+        for trace in existing_data:
+            # Keep only non-grid traces (fire points, etc.)
+            if not (trace.get('name', '').startswith('Grid Line') or 
+                   trace.get('name', '').startswith('Firefighter Station') or
+                   trace.get('name') in ['Grid Nodes', 'Local Grid Nodes'] or
+                   trace.get('name') == 'Fire Node'):
+                filtered_data.append(trace)
+        
+        # Create new figure with filtered data (no grid lines)
+        fig = go.Figure(data=filtered_data)
         
         # Preserve current map center and zoom
         if 'mapbox' in current_layout:
@@ -495,15 +513,8 @@ def register_callbacks(app, api_key):
             else:
                 print("No fire points found to create grid graph")
         else:
-            # Remove grid traces - filter out grid-related traces
-            filtered_data = []
-            for trace in existing_data:
-                # Keep only non-grid traces (fire points and other data)
-                if trace.get('name') not in ['Grid Nodes', 'Local Grid Nodes'] and not trace.get('showlegend') is False:
-                    filtered_data.append(trace)
-            
-            # Create new figure with filtered data (no grid)
-            fig = go.Figure(data=filtered_data)
+            # Grid is already filtered out above, so just return the current figure without grid
+            pass
             
             # Preserve current map center and zoom
             if 'mapbox' in current_layout:
@@ -514,7 +525,11 @@ def register_callbacks(app, api_key):
                     margin=current_layout.get('margin', {"r":0,"t":0,"l":0,"b":0})
                 )
         
-        return new_state, button_text, fig
+        # Reset everything when grid is hidden
+        if not new_state:
+            return new_state, button_text, fig, [], None, True, True
+        else:
+            return new_state, button_text, fig, no_update, no_update, no_update, no_update
 
     # Callback 2: Handle the selection of a single fire point
     @app.callback(
@@ -625,26 +640,32 @@ def register_callbacks(app, api_key):
         Input('selected-fire-point', 'data'),
         Input('selected-firefighter-stations', 'data'),
         Input('latest-saved-file', 'data'),
+        Input('grid-toggle-state', 'data'),
         prevent_initial_call=True
     )
-    def enable_buttons(selected_point, selected_stations, saved_file):
-        # Enable save button when we have both a fire point and at least one firefighter station
+    def enable_buttons(selected_point, selected_stations, saved_file, grid_toggle_state):
+        # Enable save button when we have a fire point, grid is toggled, and at least one firefighter station
         has_fire_point = selected_point is not None
         has_firefighter_station = selected_stations and len(selected_stations) > 0
         has_saved_file = saved_file is not None
+        has_grid_toggled = grid_toggle_state is True
         
-        save_enabled = has_fire_point and has_firefighter_station
-        mff_enabled = has_saved_file
+        save_enabled = has_fire_point and has_grid_toggled and has_firefighter_station
+        # Enable MFF button if we have saved file OR if we have grid toggled with firefighter stations
+        mff_enabled = has_saved_file or (has_grid_toggled and has_fire_point and has_firefighter_station)
         
         if save_enabled:
-            print("Enabling save button - have both fire point and firefighter station")
+            print("Enabling save button - have fire point, grid toggled, and firefighter station")
         else:
-            print(f"Save button disabled - fire point: {has_fire_point}, firefighter station: {has_firefighter_station}")
+            print(f"Save button disabled - fire point: {has_fire_point}, grid toggled: {has_grid_toggled}, firefighter station: {has_firefighter_station}")
             
         if mff_enabled:
-            print("Enabling MFF button - have saved file")
+            if has_saved_file:
+                print("Enabling MFF button - have saved file")
+            else:
+                print("Enabling MFF button - have grid toggled with firefighter stations")
         else:
-            print("MFF button disabled - no saved file")
+            print("MFF button disabled - missing requirements")
         
         return not save_enabled, not mff_enabled  # Return disabled states
 
@@ -798,17 +819,28 @@ def register_callbacks(app, api_key):
         
         if not selected_point:
             print("No selected point - returning disabled")
-            return True, "No fire point selected."
+            return True, "No fire point selected.", None, True
         
         if not current_figure:
             print("No current figure - returning disabled")
-            return True, "No map data available."
+            return True, "No map data available.", None, True
+        
+        if not grid_toggle_state:
+            print("Grid not toggled - returning disabled")
+            return True, "Please toggle the grid graph first.", None, True
+        
+        if not selected_stations or len(selected_stations) == 0:
+            print("No firefighter stations selected - returning disabled")
+            return True, "Please select at least one firefighter station.", None, True
         
         try:
             import json
             from datetime import datetime
             import os
-            import networkx as nx
+            try:
+                import networkx as nx
+            except ImportError:
+                return True, "NetworkX library is required but not installed. Please install it with: pip install networkx", None, True
             import numpy as np
             
             def convert_numpy_types(obj):
@@ -865,10 +897,6 @@ def register_callbacks(app, api_key):
             print(f"Grid spacing: {grid_spacing}°")
             
             # Get the center point (selected fire point)
-            if not selected_point:
-                print(f"⚠️  No fire point selected!")
-                return False, "Please select a fire point first.", None, True
-            
             center_lat, center_lon = selected_point['lat'], selected_point['lon']
             print(f"Center point: ({center_lat}, {center_lon})")
             
@@ -924,7 +952,10 @@ def register_callbacks(app, api_key):
             
             # Create distance matrix using graph shortest paths (not Haversine)
             print(f"Calculating shortest path distances...")
-            import networkx as nx
+            try:
+                import networkx as nx
+            except ImportError:
+                return True, "NetworkX library is required but not installed. Please install it with: pip install networkx", None, True
             
             # Create NetworkX graph from adjacency matrix
             G = nx.Graph()
@@ -1064,7 +1095,7 @@ def register_callbacks(app, api_key):
                 print(f"- Distance matrix in file: {len(saved_data['graph']['distance_matrix'])}x{len(saved_data['graph']['distance_matrix'][0]) if saved_data['graph']['distance_matrix'] else 0}")
                 print(f"- Distance matrix sample from file: {saved_data['graph']['distance_matrix'][0][:3] if saved_data['graph']['distance_matrix'] else 'None'}")
             
-            status_message = f"Graph data saved to: {filename}"
+            status_message = f"✅ Graph data saved successfully to {filename}"
             return False, status_message, filename, False  # Enable MFF button
             
         except Exception as e:
@@ -1076,13 +1107,196 @@ def register_callbacks(app, api_key):
         Output('results-output', 'children', allow_duplicate=True),
         Output('mff-solution-data', 'data'),
         Output('run-mff-button', 'disabled', allow_duplicate=True),
+        Output('latest-saved-file', 'data', allow_duplicate=True),
         Input('run-mff-button', 'n_clicks'),
         State('latest-saved-file', 'data'),
+        State('fire-map', 'figure'),
+        State('selected-fire-point', 'data'),
+        State('grid-toggle-state', 'data'),
+        State('selected-firefighter-stations', 'data'),
+        State('grid-graph-size-dropdown', 'value'),
+        State('grid-spacing-dropdown', 'value'),
+        State('d-value-input', 'value'),
+        State('b-value-input', 'value'),
+        State('lambda-d-input', 'value'),
         prevent_initial_call=True
     )
-    def run_mff_solver(n_clicks, saved_file):
-        if not n_clicks or not saved_file:
-            return dash.no_update, dash.no_update, dash.no_update
+    def run_mff_solver(n_clicks, saved_file, current_figure, selected_point, grid_toggle_state, selected_stations, grid_size, grid_spacing, d_value, b_value, lambda_d):
+        if not n_clicks:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        
+        # If no saved file, we need to save the graph data first
+        if not saved_file:
+            print("No saved file found, saving graph data first...")
+            try:
+                # Call the save_graph_data function logic inline
+                import json
+                from datetime import datetime
+                import os
+                try:
+                    import networkx as nx
+                except ImportError:
+                    error_content = [
+                        dbc.Alert("NetworkX library is required but not installed. Please install it with: pip install networkx", color="danger", className="mb-3"),
+                        dbc.Card([
+                            dbc.CardHeader(html.H4("❌ Missing Dependency", className="mb-0")),
+                            dbc.CardBody([
+                                html.P("The NetworkX library is required for graph operations."),
+                                html.P("Please install it with: pip install networkx")
+                            ])
+                        ])
+                    ]
+                    return error_content, None, True, None
+                import numpy as np
+                
+                def convert_numpy_types(obj):
+                    """Convert NumPy types to native Python types for JSON serialization."""
+                    if isinstance(obj, np.integer):
+                        return int(obj)
+                    elif isinstance(obj, np.floating):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, list):
+                        return [convert_numpy_types(item) for item in obj]
+                    elif isinstance(obj, dict):
+                        return {key: convert_numpy_types(value) for key, value in obj.items()}
+                    elif isinstance(obj, float) and obj == float('inf'):
+                        return "inf"
+                    return obj
+                
+                # Generate filename with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                total_nodes = grid_size * grid_size
+                filename = f"mfp_n{total_nodes}_lambda{grid_spacing}_b1_{timestamp}_problem.json"
+                
+                # Create the graph data (simplified version of save_graph_data logic)
+                graph_data = {
+                    "metadata": {
+                        "created_at": datetime.now().isoformat(),
+                        "description": "Moving Firefighter Problem Instance",
+                        "version": "1.0"
+                    },
+                    "parameters": {
+                        "n": grid_size * grid_size,
+                        "lambda_d": lambda_d if lambda_d is not None else 1.0,
+                        "burnt_nodes": 1,
+                        "instance": 0,
+                        "dimension": 2,
+                        "D": d_value if d_value is not None else 3,
+                        "B": b_value if b_value is not None else 3,
+                        "seed": None
+                    },
+                    "graph": {
+                        "adjacency_matrix": [],
+                        "distance_matrix": [],
+                        "burnt_nodes": [],
+                        "num_vertices": 0,
+                        "num_edges": 0,
+                        "coordinates": None
+                    }
+                }
+                
+                # Create grid nodes and matrices
+                center_lat, center_lon = selected_point['lat'], selected_point['lon']
+                grid_nodes = []
+                grid_size_half = grid_size // 2
+                
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        lat = center_lat + (i - grid_size_half) * grid_spacing
+                        lon = center_lon + (j - grid_size_half) * grid_spacing
+                        grid_nodes.append({
+                            'lat': lat,
+                            'lon': lon,
+                            'grid_i': i,
+                            'grid_j': j,
+                            'index': len(grid_nodes)
+                        })
+                
+                # Create adjacency and distance matrices
+                num_nodes = len(grid_nodes)
+                adjacency_matrix = [[0] * num_nodes for _ in range(num_nodes)]
+                distance_matrix = [[0] * num_nodes for _ in range(num_nodes)]
+                
+                for i in range(num_nodes):
+                    for j in range(num_nodes):
+                        if i != j:
+                            # Check if nodes are adjacent (Manhattan distance = 1)
+                            node_i = grid_nodes[i]
+                            node_j = grid_nodes[j]
+                            manhattan_dist = abs(node_i['grid_i'] - node_j['grid_i']) + abs(node_i['grid_j'] - node_j['grid_j'])
+                            
+                            if manhattan_dist == 1:
+                                adjacency_matrix[i][j] = 1
+                                distance_matrix[i][j] = 1
+                            else:
+                                # Calculate shortest path distance
+                                try:
+                                    G = nx.Graph()
+                                    for k in range(num_nodes):
+                                        G.add_node(k)
+                                    for k in range(num_nodes):
+                                        for l in range(num_nodes):
+                                            if adjacency_matrix[k][l] == 1:
+                                                G.add_edge(k, l)
+                                    path_length = nx.shortest_path_length(G, i, j, weight='weight')
+                                    distance_matrix[i][j] = float(path_length)
+                                except:
+                                    distance_matrix[i][j] = float('inf')
+                
+                # Find center node and burnt node
+                center_node_index = grid_size_half * grid_size + grid_size_half
+                coordinates = [[node['lat'], node['lon']] for node in grid_nodes]
+                
+                # Update graph data
+                graph_data["graph"]["adjacency_matrix"] = convert_numpy_types(adjacency_matrix)
+                graph_data["graph"]["distance_matrix"] = convert_numpy_types(distance_matrix)
+                graph_data["graph"]["coordinates"] = convert_numpy_types(coordinates)
+                graph_data["graph"]["num_vertices"] = convert_numpy_types(num_nodes)
+                graph_data["graph"]["num_edges"] = convert_numpy_types(sum(sum(row) for row in adjacency_matrix) // 2)
+                graph_data["graph"]["burnt_nodes"] = convert_numpy_types([center_node_index])
+                
+                # Add firefighter stations
+                if selected_stations and len(selected_stations) > 0:
+                    firefighter_indices = []
+                    for station in selected_stations:
+                        min_distance = float('inf')
+                        closest_index = 0
+                        for i, node in enumerate(grid_nodes):
+                            lat1, lon1 = station['lat'], station['lon']
+                            lat2, lon2 = node['lat'], node['lon']
+                            distance = np.sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2)
+                            if distance < min_distance:
+                                min_distance = distance
+                                closest_index = i
+                        firefighter_indices.append(closest_index)
+                    
+                    graph_data["graph"]["firefighter_stations"] = convert_numpy_types(firefighter_indices)
+                    graph_data["parameters"]["firefighters"] = len(firefighter_indices)
+                else:
+                    graph_data["parameters"]["firefighters"] = 0
+                
+                # Save to file
+                filepath = os.path.join(os.getcwd(), filename)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(graph_data, f, indent=2, default=str)
+                
+                saved_file = filename
+                print(f"Auto-saved graph data to: {filename}")
+                
+            except Exception as e:
+                error_content = [
+                    dbc.Alert(f"Failed to auto-save graph data: {str(e)}", color="danger", className="mb-3"),
+                    dbc.Card([
+                        dbc.CardHeader(html.H4("❌ Auto-Save Error", className="mb-0")),
+                        dbc.CardBody([
+                            html.P("Please manually save the graph data first using the 'Save Graph Data' button."),
+                            html.P(f"Error: {str(e)}")
+                        ])
+                    ])
+                ]
+                return error_content, None, True, None
         
         try:
             # Import MFF integration module
@@ -1138,7 +1352,7 @@ def register_callbacks(app, api_key):
                             dbc.CardHeader(html.H4("🎬 Solution Timeline", className="mb-0")),
                             dbc.CardBody([
                                 dcc.Graph(
-                                    id=f'timeline-graph-{example_num}',
+                                    id='timeline-graph',
                                     figure=timeline_fig, 
                                     style={"height": "600px"}
                                 ),
@@ -1151,7 +1365,7 @@ def register_callbacks(app, api_key):
                         dbc.Alert(f"Timeline visualization: {timeline_msg}", color="warning", className="mb-3")
                     )
                 
-                return results_content, result, False
+                return results_content, result, False, saved_file
                 
             else:
                 error_content = [
@@ -1170,7 +1384,7 @@ def register_callbacks(app, api_key):
                         ])
                     ])
                 ]
-                return error_content, None, False
+                return error_content, None, False, saved_file
                 
         except Exception as e:
             error_content = [
@@ -1188,7 +1402,7 @@ def register_callbacks(app, api_key):
                     ])
                 ])
             ]
-            return error_content, None, False
+            return error_content, None, False, saved_file
 
     @app.callback(
         Output('results-output', 'children', allow_duplicate=True),
@@ -1372,3 +1586,124 @@ def register_callbacks(app, api_key):
                 ])
             ]
             return error_content, None
+
+    # Add new callback for grid options changes
+    @app.callback(
+        Output('fire-map', 'figure', allow_duplicate=True),
+        Input('grid-graph-size-dropdown', 'value'),
+        Input('grid-spacing-dropdown', 'value'),
+        Input('map-zoom-dropdown', 'value'),
+        State('fire-map', 'figure'),
+        State('grid-toggle-state', 'data'),
+        State('selected-fire-point', 'data'),
+        State('selected-firefighter-stations', 'data'),
+        prevent_initial_call=True
+    )
+    def update_grid_on_option_change(grid_graph_size, grid_spacing, map_zoom, current_figure, grid_toggle_state, selected_point, selected_stations):
+        """Update the grid when grid options change."""
+        if not current_figure or not grid_toggle_state:
+            return no_update
+        
+        # Get the current map data and layout
+        existing_data = current_figure.get('data', [])
+        current_layout = current_figure.get('layout', {})
+        
+        # Filter out existing grid lines and firefighter stations to avoid duplication
+        filtered_data = []
+        for trace in existing_data:
+            # Keep only non-grid traces (fire points, etc.)
+            if not (trace.get('name', '').startswith('Grid Line') or 
+                   trace.get('name', '').startswith('Firefighter Station')):
+                filtered_data.append(trace)
+        
+        # Create new figure with filtered data (no grid lines)
+        fig = go.Figure(data=filtered_data)
+        
+        # Preserve current map center and zoom
+        if 'mapbox' in current_layout:
+            fig.update_layout(
+                mapbox_style=current_layout['mapbox'].get('style', 'open-street-map'),
+                mapbox_center=current_layout['mapbox'].get('center', {'lat': 0, 'lon': 0}),
+                mapbox_zoom=map_zoom if map_zoom else current_layout['mapbox'].get('zoom', 4),
+                margin=current_layout.get('margin', {"r":0,"t":0,"l":0,"b":0})
+            )
+        
+        # If grid is currently shown, update it with new parameters
+        if grid_toggle_state and selected_point:
+            try:
+                # Extract coordinates from selected point
+                center_lat = selected_point.get('lat')
+                center_lon = selected_point.get('lon')
+                
+                if center_lat is not None and center_lon is not None:
+                    # Create grid around the selected point
+                    grid_spacing_deg = grid_spacing if grid_spacing else 0.005
+                    grid_size = grid_graph_size if grid_graph_size else 7
+                    
+                    # Calculate grid bounds
+                    half_size = (grid_size - 1) / 2
+                    min_lat = center_lat - (half_size * grid_spacing_deg)
+                    max_lat = center_lat + (half_size * grid_spacing_deg)
+                    min_lon = center_lon - (half_size * grid_spacing_deg)
+                    max_lon = center_lon + (half_size * grid_spacing_deg)
+                    
+                    # Create grid lines
+                    grid_lines = []
+                    
+                    # Vertical lines
+                    for i in range(grid_size):
+                        lon = min_lon + (i * grid_spacing_deg)
+                        grid_lines.append(go.Scattermapbox(
+                            lat=[min_lat, max_lat],
+                            lon=[lon, lon],
+                            mode='lines',
+                            line=dict(color='rgba(0, 0, 255, 0.3)', width=1),
+                            name=f'Grid Line V{i}',
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
+                    
+                    # Horizontal lines
+                    for i in range(grid_size):
+                        lat = min_lat + (i * grid_spacing_deg)
+                        grid_lines.append(go.Scattermapbox(
+                            lat=[lat, lat],
+                            lon=[min_lon, max_lon],
+                            mode='lines',
+                            line=dict(color='rgba(0, 0, 255, 0.3)', width=1),
+                            name=f'Grid Line H{i}',
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
+                    
+                    # Add grid lines to figure
+                    for line in grid_lines:
+                        fig.add_trace(line)
+                    
+                    # Update firefighter stations if any are selected
+                    if selected_stations:
+                        station_traces = []
+                        for i, station in enumerate(selected_stations):
+                            station_traces.append(go.Scattermapbox(
+                                lat=[station['lat']],
+                                lon=[station['lon']],
+                                mode='markers',
+                                marker=dict(
+                                    size=12,
+                                    color='green',
+                                    symbol='star'
+                                ),
+                                name=f'Firefighter Station {i+1}',
+                                text=f"Station {i+1}<br>Lat: {station['lat']:.4f}<br>Lon: {station['lon']:.4f}",
+                                hoverinfo='text'
+                            ))
+                        
+                        for trace in station_traces:
+                            fig.add_trace(trace)
+                    
+                    print(f"Updated grid with size={grid_size}, spacing={grid_spacing_deg}, zoom={map_zoom}")
+                    
+            except Exception as e:
+                print(f"Error updating grid on option change: {e}")
+        
+        return fig
