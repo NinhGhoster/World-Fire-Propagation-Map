@@ -1,0 +1,49 @@
+{
+  "metadata": {
+    "created_at": "2025-08-04T13:17:41.627153",
+    "problem_file": "2025-08-04T13:17:39.468885",
+    "solver": "SCIP",
+    "version": "1.0"
+  },
+  "solution": {
+    "feasible": false,
+    "objective": 44.0,
+    "runtime": 0.0003407001495361328,
+    "not_interrupted": true,
+    "defense_sequence": [
+      [
+        49,
+        0,
+        0
+      ],
+      [
+        31,
+        1,
+        0
+      ],
+      [
+        25,
+        2,
+        0
+      ],
+      [
+        23,
+        3,
+        0
+      ]
+    ],
+    "distances": [
+      7.0,
+      2.0,
+      2.0
+    ],
+    "firefighter_start": 49
+  },
+  "analysis": {
+    "total_vertices": 49,
+    "initially_burning": 1,
+    "final_burned": 44.0,
+    "vertices_saved": 5.0,
+    "defended_vertices": 3
+  }
+}
