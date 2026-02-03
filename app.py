@@ -1,7 +1,7 @@
 """
 World Fire Propagation Map - Main Application Entry Point
 
-Production-ready Dash application with proper error handling and logging.
+Production-ready Dash application with REST API support.
 """
 import os
 import sys
@@ -19,6 +19,7 @@ from config import Config, get_config
 from modules.logger import setup_logging
 from modules.layout import create_layout
 from modules.callbacks import register_callbacks
+from modules.api import create_api_app
 
 # Initialize logging
 logger = setup_logging(__name__)
@@ -44,11 +45,9 @@ def create_app(debug: bool = False) -> dash.Dash:
     
     # Create Flask server
     server = Flask(__name__)
-    
-    # Configure Flask
     server.config["DEBUG"] = debug
     
-    # Add health check endpoint
+    # Health check endpoints
     @server.route("/health")
     def health_check():
         return {
@@ -59,9 +58,19 @@ def create_app(debug: bool = False) -> dash.Dash:
     
     @server.route("/ready")
     def readiness_check():
-        """Kubernetes readiness probe."""
-        # Could add more checks here (API connectivity, etc.)
         return {"status": "ready"}, 200
+    
+    @server.route("/version")
+    def version_check():
+        return {
+            "version": Config.VERSION,
+            "name": Config.APP_NAME,
+            "debug": Config.DEBUG
+        }, 200
+    
+    # Mount REST API on /api/*
+    api_app = create_api_app()
+    server.wsgi_app = api_app.wsgi_app  # Mount the API app
     
     # Create Dash app
     app = dash.Dash(
@@ -75,12 +84,6 @@ def create_app(debug: bool = False) -> dash.Dash:
         suppress_callback_exceptions=True
     )
     
-    # Set up routes
-    @server.route("/")
-    def index():
-        """Serve the main application."""
-        return app.index()
-    
     # Create layout
     logger.info("Creating application layout...")
     app.layout = create_layout(app)
@@ -88,7 +91,6 @@ def create_app(debug: bool = False) -> dash.Dash:
     # Register callbacks
     logger.info("Registering application callbacks...")
     try:
-        # Get API key from config for callbacks
         api_key = config.FIRMS_API_KEY
         register_callbacks(app, api_key)
         logger.info("Callbacks registered successfully")
@@ -121,7 +123,8 @@ def main():
     port = int(os.getenv("PORT", 8050))
     
     logger.info(f"Starting {Config.APP_NAME} v{Config.VERSION}")
-    logger.info(f"Listening on http://{host}:{port}")
+    logger.info(f"Dashboard: http://{host}:{port}")
+    logger.info(f"API:      http://{host}:{port}/api/v1/")
     
     app.run(
         host=host,
