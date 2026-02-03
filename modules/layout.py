@@ -68,6 +68,7 @@ def create_layout(app):
                                 {'label': '3×3 Grid (Small)', 'value': 3},
                                 {'label': '5×5 Grid (Medium)', 'value': 5},
                                 {'label': '7×7 Grid (Large)', 'value': 7},
+                                {'label': '9×9 Grid (X-Large)', 'value': 9},
                             ],
                             value=7,
                             clearable=False
@@ -89,8 +90,42 @@ def create_layout(app):
                         html.Label("Firefighters"),
                         dcc.Dropdown(
                             id='firefighters-dropdown',
-                            options=[{'label': str(i), 'value': i} for i in range(1, 4)],
+                            options=[{'label': str(i), 'value': i} for i in range(1, 5)],
                             value=2,
+                            clearable=False
+                        ),
+                        
+                        html.Hr(),
+                        html.H5("🌬️ Wind Conditions"),
+                        html.Label("Wind Speed (km/h)"),
+                        dcc.Dropdown(
+                            id='wind-speed-dropdown',
+                            options=[
+                                {'label': 'Calm (0 km/h)', 'value': 0},
+                                {'label': 'Light Breeze (15 km/h)', 'value': 15},
+                                {'label': 'Moderate (30 km/h)', 'value': 30},
+                                {'label': 'Strong (50 km/h)', 'value': 50},
+                                {'label': 'Gale (70 km/h)', 'value': 70},
+                                {'label': 'Storm (100 km/h)', 'value': 100},
+                            ],
+                            value=30,
+                            clearable=False
+                        ),
+                        html.Br(),
+                        html.Label("Wind Direction"),
+                        dcc.Dropdown(
+                            id='wind-direction-dropdown',
+                            options=[
+                                {'label': '⬆️ North', 'value': 'N'},
+                                {'label': '↗️ North-East', 'value': 'NE'},
+                                {'label': '➡️ East', 'value': 'E'},
+                                {'label': '↘️ South-East', 'value': 'SE'},
+                                {'label': '⬇️ South', 'value': 'S'},
+                                {'label': '↙️ South-West', 'value': 'SW'},
+                                {'label': '⬅️ West', 'value': 'W'},
+                                {'label': '↖️ North-West', 'value': 'NW'},
+                            ],
+                            value='NE',
                             clearable=False
                         ),
                         
@@ -126,6 +161,7 @@ def create_layout(app):
                 html.P([
                     "🔥 World Fire Propagation Map v2.0 | ",
                     "Data: NASA FIRMS | ",
+                    "🌬️ Wind-adjusted spread model | ",
                     "Powered by Dash + Plotly"
                 ], className="text-center text-muted small")
             ])

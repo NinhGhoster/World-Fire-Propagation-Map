@@ -34,7 +34,6 @@ def register_callbacks(app, api_key):
             
             fig = go.Figure()
             
-            # Center of the country
             center_lat = (south + north) / 2
             center_lon = (west + east) / 2
             
@@ -101,7 +100,6 @@ def register_callbacks(app, api_key):
         lat, lon = selected_point['lat'], selected_point['lon']
         
         try:
-            # Get country info
             country_df = get_country_list()
             country_name = country
             for _, row in country_df.iterrows():
@@ -109,19 +107,15 @@ def register_callbacks(app, api_key):
                     country_name = row['name']
                     break
             
-            # Fetch fire data for region
             bbox = country_df[country_df['abreviation'] == country]['bbox_coords'].values[0]
             west, south, east, north = map(float, bbox.split(','))
             boundary_str = f"{west},{south},{east},{north}"
             df = get_fire_data(api_key, boundary_str)
             
-            # Count fires
             total_fires = len(df) if not df.empty else 0
             
-            # Calculate region stats
-            region_area = (east - west) * (north - south) * 111 * 111  # Approximate km²
+            region_area = (east - west) * (north - south) * 111 * 111
             
-            # Find fires near selected point
             if not df.empty:
                 df['distance'] = ((df['latitude'] - lat)**2 + (df['longitude'] - lon)**2)**0.5
                 nearby = df[df['distance'] < 2.0]
@@ -187,38 +181,45 @@ def register_callbacks(app, api_key):
         except Exception as e:
             return dbc.Alert(f"❌ Analysis failed: {e}", color="danger")
     
-    # 4. Run Simulation
+    # 4. Run Simulation with Wind
     @app.callback(
         Output('results-output', 'children', allow_duplicate=True),
         Input('simulate-button', 'n_clicks'),
         State('grid-graph-size-dropdown', 'value'),
         State('lambda-dropdown', 'value'),
         State('firefighters-dropdown', 'value'),
+        State('wind-speed-dropdown', 'value'),
+        State('wind-direction-dropdown', 'value'),
         prevent_initial_call=True
     )
-    def run_simulation(n_clicks, grid_size, lambda_val, firefighters):
+    def run_simulation(n_clicks, grid_size, lambda_val, firefighters, wind_speed, wind_dir):
         if not n_clicks:
             return no_update
         
-        # Run simulation
+        # Run simulation with wind
         config = SimulationConfig(
             grid_size=grid_size,
             lambda_spread=lambda_val,
             num_firefighters=firefighters,
-            fire_start_nodes=[grid_size**2 // 2],  # Center
-            seed=42
+            fire_start_nodes=[grid_size**2 // 2],
+            seed=42,
+            wind_speed=wind_speed,
+            wind_direction=wind_dir
         )
         
         simulator = FireSpreadSimulator(config)
         result = simulator.run(firefighter_strategy="greedy")
         
-        # Calculate protection percentage
         total_nodes = grid_size ** 2
         protection_pct = (result.total_protected / total_nodes) * 100
         burn_pct = (result.total_burned / total_nodes) * 100
         
-        # ASCII visualization
-        grid = simulator.get_grid_visualization()
+        # ASCII visualization with wind direction indicator
+        direction_arrows = {
+            "N": "⬆️", "NE": "↗️", "E": "➡️", "SE": "↘️",
+            "S": "⬇️", "SW": "↙️", "W": "⬅️", "NW": "↖️"
+        }
+        
         ascii_lines = []
         for row in range(grid_size):
             line = ""
@@ -234,12 +235,31 @@ def register_callbacks(app, api_key):
                     line += "░"
             ascii_lines.append(line)
         
+        # Build wind visualization
+        wind_visual = dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Span(direction_arrows.get(wind_dir, "➡️"), className="display-6"),
+                    html.P(f"{wind_dir}", className="mb-0 small")
+                ], className="text-center")
+            ], width=2),
+            dbc.Col([
+                html.H6(f"🌬️ {wind_speed} km/h {wind_dir}", className="mb-1"),
+                html.Progress([
+                    html.Bar(min=0, max=100, value=wind_speed, striped=True, animated=True)
+                ], className="mb-1"),
+                html.P(f"Spread multiplier: ×{(1 + wind_speed/25):.1f}", className="small text-muted")
+            ], width=10)
+        ], className="mb-3")
+        
         return dbc.Card([
             dbc.CardHeader([
                 html.H5("🧯 Fire Spread Simulation", className="mb-0 d-inline"),
                 html.Span(f" {grid_size}×{grid_size} grid", className="badge bg-secondary ms-2")
             ]),
             dbc.CardBody([
+                wind_visual,
+                html.Hr(),
                 dbc.Row([
                     dbc.Col([
                         html.H3(str(result.total_burned), className="text-danger"),
@@ -258,7 +278,6 @@ def register_callbacks(app, api_key):
                         html.P("Protected %", className="small text-muted")
                     ], className="text-center"),
                 ], className="mb-3"),
-                html.Hr(),
                 html.Pre("\n".join(ascii_lines), className="text-center font-monospace small mb-2"),
                 html.P([
                     "Legend: ", html.Span("🔥", className="text-danger"), "=Burning  ",
@@ -269,7 +288,7 @@ def register_callbacks(app, api_key):
                 html.Hr(),
                 html.P([
                     html.Strong("Parameters: "),
-                    f"λ={lambda_val}, {firefighters} firefighters, strategy=greedy"
+                    f"λ={lambda_val}, {firefighters} firefighters, wind={wind_speed}km/h {wind_dir}"
                 ], className="small text-muted")
             ])
         ], className="shadow-sm mt-3")
@@ -280,29 +299,30 @@ def register_callbacks(app, api_key):
         Input('compare-button', 'n_clicks'),
         State('grid-graph-size-dropdown', 'value'),
         State('lambda-dropdown', 'value'),
+        State('wind-speed-dropdown', 'value'),
+        State('wind-direction-dropdown', 'value'),
         prevent_initial_call=True
     )
-    def compare_strategies(n_clicks, grid_size, lambda_val):
+    def compare_strategies(n_clicks, grid_size, lambda_val, wind_speed, wind_dir):
         if not n_clicks:
             return no_update
         
-        # Run comparison
         config = SimulationConfig(
             grid_size=grid_size,
             lambda_spread=lambda_val,
             num_firefighters=2,
             fire_start_nodes=[grid_size**2 // 2],
-            seed=42
+            seed=42,
+            wind_speed=wind_speed,
+            wind_direction=wind_dir
         )
         
         simulator = FireSpreadSimulator(config)
         comparison = simulator.compare_strategies()
         
-        # Find best strategy
         best = min(comparison.keys(), key=lambda s: comparison[s].total_burned)
         best_result = comparison[best]
         
-        # Build comparison table
         rows = []
         for strategy, res in comparison.items():
             is_best = strategy == best
@@ -323,7 +343,7 @@ def register_callbacks(app, api_key):
             dbc.CardBody([
                 html.P([
                     html.Strong("Configuration: "),
-                    f"{grid_size}×{grid_size} grid, λ={lambda_val}, 2 firefighters"
+                    f"{grid_size}×{grid_size} grid, λ={lambda_val}, wind={wind_speed}km/h"
                 ], className="small text-muted"),
                 html.Hr(),
                 dbc.Row([
@@ -336,13 +356,12 @@ def register_callbacks(app, api_key):
                 html.Hr(),
                 dbc.Alert([
                     html.H6("💡 Recommendation", className="mb-1"),
-                    f"The {best.capitalize()} strategy minimizes burned nodes ({best_result.total_burned}). ",
-                    "This strategy protects high-degree nodes to block fire spread."
+                    f"The {best.capitalize()} strategy minimizes burned nodes ({best_result.total_burned})."
                 ], color="success", className="mb-0")
             ])
         ], className="shadow-sm mt-3")
     
-    # 6. Demo Button - Load Australia with fires
+    # 6. Demo Button
     @app.callback(
         [Output('fire-map', 'figure', allow_duplicate=True),
          Output('selection-status', 'children', allow_duplicate=True),
@@ -356,11 +375,9 @@ def register_callbacks(app, api_key):
             return no_update, no_update, no_update, no_update
         
         try:
-            # Fetch Australia fires
             df = get_fire_data(api_key, "110,-40,160,-10", day_range=3)
             
             if df.empty:
-                # Use sample data
                 sample_data = [
                     {"latitude": -21.0, "longitude": 116.8, "brightness": 326, "frp": 50},
                     {"latitude": -35.6, "longitude": 138.1, "brightness": 355, "frp": 135},
@@ -370,7 +387,6 @@ def register_callbacks(app, api_key):
             
             fig = go.Figure()
             
-            # Add all fires
             fig.add_trace(go.Scattermapbox(
                 lat=df['latitude'],
                 lon=df['longitude'],
@@ -382,7 +398,6 @@ def register_callbacks(app, api_key):
                 name=f'Active Fires ({len(df)})'
             ))
             
-            # Pre-select a fire point (first one)
             selected_lat = df.iloc[0]['latitude']
             selected_lon = df.iloc[0]['longitude']
             
