@@ -1,0 +1,39 @@
+# World Fire Propagation Map - Docker Compose Configuration
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8050:8050"
+    environment:
+      - FIRMS_API_KEY=${FIRMS_API_KEY}
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./assets:/app/assets
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8050/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Gunicorn for production
+  app-prod:
+    build: .
+    ports:
+      - "8051:8050"
+    environment:
+      - FIRMS_API_KEY=${FIRMS_API_KEY}
+      - DEBUG=false
+      - LOG_LEVEL=WARNING
+    command: gunicorn --bind 0.0.0.0:8050 --workers 2 --timeout 120 app:app.server
+    volumes:
+      - ./assets:/app/assets
+    restart: unless-stopped
+
+networks:
+  default:
+    name: fire-propagation-network
