@@ -20,6 +20,7 @@ from modules.layout import create_layout
 from modules.callbacks import register_callbacks
 from modules.data_fetcher import DataFetcher, FALLBACK_COUNTRIES, FIRMSAPIError
 from modules.simulation import FireSpreadSimulator, SimulationConfig
+from modules.fire_stations import get_coverage_status, get_nearest_stations, haversine_distance
 
 logger = setup_logging(__name__)
 
@@ -112,6 +113,25 @@ def create_app(debug: bool = False) -> dash.Dash:
         except Exception as e:
             return jsonify({"error": str(e)}), 400
     
+    @server.route("/api/v1/stations", methods=["GET", "OPTIONS"])
+    def get_fire_stations():
+        """Get fire station coverage for a location."""
+        lat = request.args.get("lat", type=float)
+        lon = request.args.get("lon", type=float)
+        country = request.args.get("country")
+        
+        if lat is None or lon is None:
+            return jsonify({"error": "Missing required parameters", "required": ["lat", "lon"]}), 400
+        
+        try:
+            status = get_coverage_status(lat, lon, country)
+            return jsonify({
+                "status": "success",
+                "coverage": status
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
     @server.route("/api/v1/analyze", methods=["POST", "OPTIONS"])
     def analyze_location():
         from modules.analysis_pipeline import run_analysis_pipeline
@@ -135,6 +155,10 @@ def create_app(debug: bool = False) -> dash.Dash:
                 grid_size=grid_size
             )
             
+            # Add fire station coverage
+            coverage = get_coverage_status(lat, lon)
+            result['fire_stations'] = coverage
+            
             if result['stats']['total_fires'] == 0:
                 result['message'] = "No fires detected in this area. Try a different location or use Load Example 1."
             
@@ -142,6 +166,7 @@ def create_app(debug: bool = False) -> dash.Dash:
                 "status": "success",
                 "location": {"lat": lat, "lon": lon},
                 "stats": result['stats'],
+                "fire_stations": coverage,
                 "message": result.get('message', '')
             })
         except Exception as e:
@@ -150,8 +175,10 @@ def create_app(debug: bool = False) -> dash.Dash:
     
     @server.route("/api/v1/simulate", methods=["POST", "OPTIONS"])
     def simulate_fire():
-        """Run fire spread simulation with wind."""
-        data = request.get_json() or {}
+        """Run fire spread simulation with wind and response time."""
+        data = request.args or {}
+        if request.is_json:
+            data = request.get_json() or {}
         
         grid_size = data.get("grid_size", 7)
         lambda_spread = data.get("lambda_spread", 0.1)
@@ -163,10 +190,8 @@ def create_app(debug: bool = False) -> dash.Dash:
         wind_speed = data.get("wind_speed", 30.0)
         wind_direction = data.get("wind_direction", "NE")
         
-        # Weather parameters
-        temperature = data.get("temperature", 25.0)
-        humidity = data.get("humidity", 30.0)
-        vegetation_dryness = data.get("vegetation_dryness", 0.8)
+        # Response time
+        response_time = data.get("response_time", 15)
         
         config = SimulationConfig(
             grid_size=grid_size,
@@ -176,9 +201,7 @@ def create_app(debug: bool = False) -> dash.Dash:
             seed=data.get("seed", 42),
             wind_speed=wind_speed,
             wind_direction=wind_direction,
-            temperature=temperature,
-            humidity=humidity,
-            vegetation_dryness=vegetation_dryness
+            response_time=response_time
         )
         
         simulator = FireSpreadSimulator(config)
@@ -191,15 +214,8 @@ def create_app(debug: bool = False) -> dash.Dash:
                 "lambda": lambda_spread,
                 "firefighters": firefighters,
                 "strategy": strategy,
-                "wind": {
-                    "speed_kmh": wind_speed,
-                    "direction": wind_direction
-                },
-                "weather": {
-                    "temperature_c": temperature,
-                    "humidity_percent": humidity,
-                    "vegetation_dryness": vegetation_dryness
-                }
+                "wind": {"speed_kmh": wind_speed, "direction": wind_direction},
+                "response_time_min": response_time
             },
             "results": {
                 "total_burned": result.total_burned,
@@ -220,8 +236,6 @@ def create_app(debug: bool = False) -> dash.Dash:
         lambda_spread = data.get("lambda_spread", 0.1)
         firefighters = data.get("firefighters", 2)
         start_node = data.get("start_node", grid_size ** 2 // 2)
-        
-        # Wind parameters
         wind_speed = data.get("wind_speed", 30.0)
         wind_direction = data.get("wind_direction", "NE")
         
@@ -260,31 +274,26 @@ def create_app(debug: bool = False) -> dash.Dash:
     
     @server.route("/api/v1/forecast", methods=["POST", "OPTIONS"])
     def forecast_spread():
-        """
-        Predict fire spread given weather conditions.
-        Returns expected burn area and recommended firefighter positions.
-        """
+        """Predict fire spread with evacuation recommendations."""
         data = request.get_json() or {}
         
         lat = data.get("lat")
         lon = data.get("lon")
         hours = data.get("hours", 24)
-        
         wind_speed = data.get("wind_speed", 30.0)
         wind_direction = data.get("wind_direction", "NE")
         temperature = data.get("temperature", 25.0)
         humidity = data.get("humidity", 30.0)
         
-        # Convert hours to approximate time steps (1 step ≈ 15 min)
+        # Time steps (1 step ≈ 15 min)
         time_steps = int(hours * 4)
         grid_size = min(15, max(7, time_steps // 4))
         
-        # Estimate spread based on conditions
+        # Spread calculation
         base_lambda = 0.1
         wind_factor = 1.0 + (wind_speed / 25.0)
         temp_factor = 1.0 + (temperature - 25.0) / 50.0
         humidity_factor = 1.0 - (humidity - 30.0) / 200.0
-        
         estimated_lambda = base_lambda * wind_factor * temp_factor * humidity_factor
         
         # Run simulation
@@ -304,8 +313,39 @@ def create_app(debug: bool = False) -> dash.Dash:
         result = simulator.run(firefighter_strategy="greedy")
         
         # Calculate burn area
-        cell_size_km = 1.0  # Approximate
+        cell_size_km = 1.0
         burn_area_km2 = result.total_burned * (cell_size_km ** 2)
+        
+        # Evacuation zones based on wind direction
+        evacuation_zones = []
+        downwind_distance = min(hours * 2, 50)  # 2km per hour of spread
+        
+        evacuation_zones.append({
+            "zone": "CRITICAL",
+            "distance_km": downwind_distance,
+            "direction": wind_direction,
+            "action": "IMMEDIATE EVACUATION",
+            "ETA_fire_arrival": f"{hours // 2}h-{hours}h"
+        })
+        
+        evacuation_zones.append({
+            "zone": "WARNING",
+            "distance_km": downwind_distance * 1.5,
+            "direction": wind_direction,
+            "action": "PREPARE TO EVACUATE",
+            "ETA_fire_arrival": f"{hours}h-{hours*2}h"
+        })
+        
+        # Fire station dispatch
+        coverage = get_coverage_status(lat, lon)
+        recommended_dispatch = []
+        for station in coverage['stations'][:3]:
+            if station['in_coverage_radius']:
+                recommended_dispatch.append({
+                    "station": station['station'],
+                    "trucks": min(2, station['trucks_available']),
+                    "ETA": f"{station['response_time_min']} min"
+                })
         
         return jsonify({
             "status": "success",
@@ -313,7 +353,7 @@ def create_app(debug: bool = False) -> dash.Dash:
             "forecast": {
                 "hours": hours,
                 "time_steps": time_steps,
-                "estimated_burn_area_km2": burn_area_km2,
+                "estimated_burn_area_km2": round(burn_area_km2, 1),
                 "nodes_burned": result.total_burned,
                 "nodes_protected": result.total_protected,
                 "containment_time_steps": result.time_steps
@@ -325,14 +365,57 @@ def create_app(debug: bool = False) -> dash.Dash:
                 "humidity_percent": humidity,
                 "effective_spread_rate": round(estimated_lambda, 3)
             },
-            "recommendations": {
-                "firefighters_needed": max(2, result.total_burned // 10),
-                "priority_directions": [wind_direction, 
-                    {"N": "S", "NE": "SW", "E": "W", "SE": "NW",
-                     "S": "N", "SW": "NE", "W": "E", "NW": "SE"}[wind_direction]],
-                "evacuation_zones": ["within 5km downwind"]
+            "evacuation": evacuation_zones,
+            "fire_dispatch": recommended_dispatch,
+            "nearest_station": {
+                "name": coverage['nearest_station'],
+                "response_time": coverage['best_response_time'],
+                "available_trucks": coverage['total_available_trucks']
             }
         })
+    
+    @server.route("/api/v1/export/geojson", methods=["GET", "OPTIONS"])
+    def export_geojson():
+        """Export fire data as GeoJSON for GIS."""
+        lat = request.args.get("lat", type=float)
+        lon = request.args.get("lon", type=float)
+        radius = request.args.get("radius", 100, type=float)
+        
+        if lat is None or lon is None:
+            return jsonify({"error": "Missing lat, lon"}), 400
+        
+        try:
+            from modules.analysis_pipeline import point_to_boundary
+            boundary_str, bounds = point_to_boundary(lat, lon, radius_km=radius)
+            
+            fetcher = DataFetcher(Config.FIRMS_API_KEY)
+            df = fetcher.get_fire_data(boundary_str)
+            
+            features = []
+            for _, row in df.iterrows():
+                features.append({
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [row['longitude'], row['latitude']]
+                    },
+                    "properties": {
+                        "brightness": row.get('brightness'),
+                        "frp": row.get('frp'),
+                        "acq_date": row.get('acq_date'),
+                        "confidence": row.get('confidence')
+                    }
+                })
+            
+            geojson = {
+                "type": "FeatureCollection",
+                "features": features
+            }
+            
+            return jsonify(geojson)
+            
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/parameters", methods=["GET", "OPTIONS"])
     def get_parameters():
@@ -343,7 +426,8 @@ def create_app(debug: bool = False) -> dash.Dash:
             "strategies": ["greedy", "random", "central"],
             "sources": ["MODIS_NRT", "VIIRS_NRT"],
             "wind_speeds": [0, 15, 30, 50, 70, 100],
-            "wind_directions": ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+            "wind_directions": ["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
+            "response_times": [5, 10, 15, 20, 30, 45, 60]
         })
     
     @server.route("/api/v1/demo", methods=["GET", "OPTIONS"])

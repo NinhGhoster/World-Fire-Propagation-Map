@@ -21,7 +21,7 @@ def create_layout(app):
         dbc.Row([
             dbc.Col([
                 html.H1("🔥 World Fire Propagation Map", className="my-4 text-center"),
-                html.P("Real-time wildfire tracking & Moving Firefighter Problem optimization", 
+                html.P("Real-time wildfire tracking, evacuation planning & firefighter dispatch", 
                       className="text-center text-muted")
             ], width=12)
         ], className="mb-4"),
@@ -55,7 +55,7 @@ def create_layout(app):
                         
                         html.Hr(),
                         html.H5("2. Fire Point Selection"),
-                        html.P("Click on a fire point (red dot) on the map to select it for analysis.", 
+                        html.P("Click on a fire point (red dot) to analyze.", 
                               className="small text-muted"),
                         html.Div(id="selection-status", className="mt-2 text-primary fw-bold"),
                         
@@ -130,11 +130,29 @@ def create_layout(app):
                         ),
                         
                         html.Hr(),
+                        html.H5("🚒 Response & Evacuation"),
+                        html.Label("Response Time (min)"),
+                        dcc.Dropdown(
+                            id='response-time-dropdown',
+                            options=[
+                                {'label': 'Rapid (5 min)', 'value': 5},
+                                {'label': 'Fast (10 min)', 'value': 10},
+                                {'label': 'Standard (15 min)', 'value': 15},
+                                {'label': 'Slow (30 min)', 'value': 30},
+                                {'label': 'Delayed (60 min)', 'value': 60},
+                            ],
+                            value=15,
+                            clearable=False
+                        ),
+                        
+                        html.Hr(),
                         dbc.Button("📊 Analyze Region", id="analyze-button", color="primary", 
                                  className="w-100 mb-2", disabled=True),
                         dbc.Button("🧯 Run Simulation", id="simulate-button", color="success",
                                  className="w-100 mb-2"),
                         dbc.Button("📈 Compare Strategies", id="compare-button", color="info",
+                                 className="w-100 mb-2"),
+                        dbc.Button("🚨 Get Evacuation Plan", id="evacuate-button", color="danger",
                                  className="w-100 mb-2"),
                         
                         html.Hr(),
@@ -161,7 +179,8 @@ def create_layout(app):
                 html.P([
                     "🔥 World Fire Propagation Map v2.0 | ",
                     "Data: NASA FIRMS | ",
-                    "🌬️ Wind-adjusted spread model | ",
+                    "🚒 Fire Station Coverage | ",
+                    "🚨 Evacuation Planning | ",
                     "Powered by Dash + Plotly"
                 ], className="text-center text-muted small")
             ])
