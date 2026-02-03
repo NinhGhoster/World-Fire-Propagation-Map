@@ -2,22 +2,24 @@
 World Fire Propagation Map v3.0 - 100x Better
 
 Production-ready Dash application with:
-- Real-time fire tracking
-- Weather integration
+- Real-time fire tracking (NASA FIRMS)
+- Weather integration (OpenWeatherMap + FWI)
 - Fire analytics (hotspots, seasonal patterns, risk assessment)
-- Enhanced simulation with wind
-- Modern UI with tabs
+- Notification system (email, SMS)
+- Rate limiting & API key management
+- PWA support (offline, mobile)
 """
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import dash
 import dash_bootstrap_components as dbc
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 from config import Config, get_config
 from modules.logger import setup_logging
@@ -27,6 +29,11 @@ from modules.data_fetcher import DataFetcher, FIRMSAPIError
 from modules.simulation import FireSpreadSimulator, SimulationConfig
 from modules.weather import WeatherAPI, get_fire_danger
 from modules.analytics import FireAnalytics, analyze_fires
+from modules.notifications import AlertManager, register_alert_routes
+from modules.rate_limiter import (
+    rate_limiter, api_key_manager,
+    register_rate_limit_routes
+)
 
 logger = setup_logging(__name__)
 
@@ -39,8 +46,9 @@ def create_app(debug: bool = False) -> dash.Dash:
     @server.after_request
     def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+        response.headers['Access-Control-Expose-Headers'] = 'X-RateLimit-Remaining'
         return response
     
     @server.route("/health")
@@ -49,14 +57,45 @@ def create_app(debug: bool = False) -> dash.Dash:
             "status": "healthy",
             "version": "3.0.0",
             "name": "World Fire Propagation Map",
-            "features": ["fire_tracking", "weather", "analytics", "simulation"]
+            "features": ["fire_tracking", "weather", "analytics", "simulation", "notifications", "pwa"],
+            "uptime": "running"
         })
+    
+    @server.route("/version")
+    def version_info():
+        return jsonify({
+            "version": "3.0.0",
+            "name": "World Fire Propagation Map",
+            "build": datetime.now().isoformat()
+        })
+    
+    # ========== PWA ROUTES ==========
+    
+    @server.route("/manifest.json")
+    def manifest():
+        return send_from_directory(
+            str(PROJECT_ROOT / "assets"),
+            "manifest.json",
+            mimetype="application/manifest+json"
+        )
+    
+    @server.route("/service-worker.js")
+    def service_worker():
+        return send_from_directory(
+            str(PROJECT_ROOT / "assets"),
+            "service-worker.js",
+            mimetype="application/javascript"
+        )
     
     # ========== API ROUTES ==========
     
     @server.route("/api/v1/fires", methods=["GET"])
     def get_fires():
-        """Get active fires for an area."""
+        identifier = request.headers.get("X-API-Key") or request.remote_addr
+        allowed, info = rate_limiter.is_allowed(identifier, "/api/v1/fires")
+        if not allowed:
+            return jsonify({"error": "Rate limit exceeded", **info}), 429
+        
         lat = request.args.get("lat", type=float)
         lon = request.args.get("lon", type=float)
         radius = request.args.get("radius", 200, type=float)
@@ -71,17 +110,18 @@ def create_app(debug: bool = False) -> dash.Dash:
             fetcher = DataFetcher(Config.FIRMS_API_KEY)
             df = fetcher.get_fire_data(boundary_str)
             
-            return jsonify({
+            response = jsonify({
                 "count": len(df),
                 "bounds": bounds,
                 "data": df.to_dict(orient="records") if not df.empty else []
             })
+            response.headers["X-RateLimit-Remaining"] = str(info.get("remaining", 0))
+            return response
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/weather", methods=["GET"])
     def get_weather():
-        """Get current weather and fire danger."""
         lat = request.args.get("lat", type=float)
         lon = request.args.get("lon", type=float)
         
@@ -92,21 +132,14 @@ def create_app(debug: bool = False) -> dash.Dash:
             weather_api = WeatherAPI()
             weather = weather_api.get_current(lat, lon)
             danger = weather_api.calculate_fire_danger(weather)
-            
-            return jsonify({
-                "weather": weather.to_dict(),
-                "fire_danger": danger.to_dict()
-            })
+            return jsonify({"weather": weather.to_dict(), "fire_danger": danger.to_dict()})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/forecast", methods=["POST"])
     def get_forecast():
-        """Get fire spread forecast."""
         data = request.get_json() or {}
-        
-        lat = data.get("lat")
-        lon = data.get("lon")
+        lat, lon = data.get("lat"), data.get("lon")
         hours = data.get("hours", 24)
         
         if lat is None or lon is None:
@@ -115,30 +148,16 @@ def create_app(debug: bool = False) -> dash.Dash:
         try:
             weather_api = WeatherAPI()
             forecast = weather_api.get_forecast(lat, lon, hours)
-            
-            # Calculate fire danger for each forecast hour
             dangers = []
             for w in forecast:
                 danger = weather_api.calculate_fire_danger(w)
-                dangers.append({
-                    "time": w.timestamp.isoformat(),
-                    "danger": danger.rating,
-                    "score": danger.score,
-                    "fwi": danger.fwi
-                })
-            
-            return jsonify({
-                "location": {"lat": lat, "lon": lon},
-                "hours": hours,
-                "weather_forecast": [w.to_dict() for w in forecast],
-                "fire_danger_forecast": dangers
-            })
+                dangers.append({"time": w.timestamp.isoformat(), "danger": danger.rating, "score": danger.score, "fwi": danger.fwi})
+            return jsonify({"location": {"lat": lat, "lon": lon}, "hours": hours, "weather_forecast": [w.to_dict() for w in forecast], "fire_danger_forecast": dangers})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/analytics/hotspots", methods=["GET"])
     def get_hotspots():
-        """Identify fire hotspots."""
         lat = request.args.get("lat", type=float)
         lon = request.args.get("lon", type=float)
         radius = request.args.get("radius", 500, type=float)
@@ -149,48 +168,27 @@ def create_app(debug: bool = False) -> dash.Dash:
         try:
             from modules.analysis_pipeline import point_to_boundary
             boundary_str, _ = point_to_boundary(lat, lon, radius_km=radius)
-            
             fetcher = DataFetcher(Config.FIRMS_API_KEY)
             df = fetcher.get_fire_data(boundary_str)
-            
             analytics = FireAnalytics()
-            hotspots = analytics.identify_hotspots(
-                df.to_dict(orient="records") if not df.empty else []
-            )
-            
-            return jsonify({
-                "hotspot_count": len(hotspots),
-                "hotspots": [h.to_dict() for h in hotspots],
-                "summary": analytics.get_summary()
-            })
+            hotspots = analytics.identify_hotspots(df.to_dict(orient="records") if not df.empty else [])
+            return jsonify({"hotspot_count": len(hotspots), "hotspots": [h.to_dict() for h in hotspots], "summary": analytics.get_summary()})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/analytics/seasonal", methods=["GET"])
     def get_seasonal():
-        """Get seasonal fire patterns."""
-        lat = request.args.get("lat", type=float)
-        lon = request.args.get("lon", type=float)
-        
-        # For now, return regional patterns
         try:
             fetcher = DataFetcher(Config.FIRMS_API_KEY)
             df = fetcher.get_fire_data("-180,-90,180,90")
-            
             analytics = FireAnalytics()
-            patterns = analytics.analyze_seasonal_patterns(
-                df.to_dict(orient="records") if not df.empty else []
-            )
-            
-            return jsonify({
-                "patterns": [p.to_dict() for p in patterns]
-            })
+            patterns = analytics.analyze_seasonal_patterns(df.to_dict(orient="records") if not df.empty else [])
+            return jsonify({"patterns": [p.to_dict() for p in patterns]})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/risk", methods=["GET"])
     def get_risk():
-        """Get fire risk assessment."""
         lat = request.args.get("lat", type=float)
         lon = request.args.get("lon", type=float)
         
@@ -198,31 +196,25 @@ def create_app(debug: bool = False) -> dash.Dash:
             return jsonify({"error": "Missing lat, lon"}), 400
         
         try:
-            # Get fires
             from modules.analysis_pipeline import point_to_boundary
             boundary_str, _ = point_to_boundary(lat, lon, radius_km=100)
             fetcher = DataFetcher(Config.FIRMS_API_KEY)
             df = fetcher.get_fire_data(boundary_str)
             fires = df.to_dict(orient="records") if not df.empty else []
             
-            # Get weather
             weather_api = WeatherAPI()
             weather = weather_api.get_current(lat, lon)
             weather_data = weather.to_dict() if weather else {}
             
-            # Assess risk
             analytics = FireAnalytics()
             risk = analytics.assess_risk(lat, lon, fires, weather_data)
-            
             return jsonify(risk.to_dict())
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
     @server.route("/api/v1/simulate", methods=["POST"])
     def simulate_fire():
-        """Run fire spread simulation."""
         data = request.get_json() or {}
-        
         config = SimulationConfig(
             grid_size=data.get("grid_size", 7),
             lambda_spread=data.get("lambda_spread", 0.1),
@@ -232,62 +224,32 @@ def create_app(debug: bool = False) -> dash.Dash:
             wind_speed=data.get("wind_speed", 30),
             wind_direction=data.get("wind_direction", "NE")
         )
-        
         simulator = FireSpreadSimulator(config)
         result = simulator.run(firefighter_strategy=data.get("strategy", "greedy"))
-        
-        return jsonify({
-            "status": "success",
-            "configuration": {
-                "grid_size": config.grid_size,
-                "lambda": config.lambda_spread,
-                "firefighters": config.num_firefighters,
-                "wind": {"speed": config.wind_speed, "direction": config.wind_direction}
-            },
-            "results": {
-                "total_burned": result.total_burned,
-                "total_protected": result.total_protected,
-                "time_steps": result.time_steps
-            }
-        })
+        return jsonify({"status": "success", "configuration": {"grid_size": config.grid_size, "lambda": config.lambda_spread, "firefighters": config.num_firefighters, "wind": {"speed": config.wind_speed, "direction": config.wind_direction}}, "results": {"total_burned": result.total_burned, "total_protected": result.total_protected, "time_steps": result.time_steps}})
     
     @server.route("/api/v1/demo")
     def get_demo():
-        """Get demo data for Australia."""
         try:
             fetcher = DataFetcher(Config.FIRMS_API_KEY)
             df = fetcher.get_fire_data("110,-40,160,-10")
-            
             if df.empty:
-                return jsonify({
-                    "status": "demo",
-                    "message": "No live data",
-                    "data": [
-                        {"latitude": -21.0, "longitude": 116.8, "brightness": 326, "frp": 50},
-                        {"latitude": -35.6, "longitude": 138.1, "brightness": 355, "frp": 135},
-                    ]
-                })
-            
-            return jsonify({
-                "status": "demo",
-                "total_fires": len(df),
-                "data": df.head(50).to_dict(orient="records")
-            })
+                return jsonify({"status": "demo", "message": "No live data", "data": [{"latitude": -21.0, "longitude": 116.8, "brightness": 326, "frp": 50}, {"latitude": -35.6, "longitude": 138.1, "brightness": 355, "frp": 135}]})
+            return jsonify({"status": "demo", "total_fires": len(df), "data": df.head(50).to_dict(orient="records")})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
+    # ========== ALERT & RATE LIMIT ROUTES ==========
+    register_alert_routes(server)
+    register_rate_limit_routes(server)
+    
+    @server.route("/api/v1/docs")
+    def api_docs():
+        return jsonify({"docs": "/api/v1/docs/openapi.json", "swagger_ui": "OpenAPI spec available at /api/v1/docs/openapi.json"})
+    
     # ========== DASH APP ==========
     
-    app = dash.Dash(
-        __name__,
-        server=server,
-        external_stylesheets=[
-            dbc.themes.BOOTSTRAP,
-            dbc.icons.BOOTSTRAP
-        ],
-        title="World Fire Propagation Map v3.0",
-        suppress_callback_exceptions=True
-    )
+    app = dash.Dash(__name__, server=server, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP], title="World Fire Propagation Map v3.0", suppress_callback_exceptions=True, assets_folder=str(PROJECT_ROOT / "assets"))
     
     logger.info("Creating v3.0 application layout...")
     app.layout = create_layout(app)
@@ -307,7 +269,6 @@ def create_app(debug: bool = False) -> dash.Dash:
 def main():
     config = get_config()
     app = create_app(debug=config.DEBUG)
-    
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8050))
     
