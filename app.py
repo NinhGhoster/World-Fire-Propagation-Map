@@ -20,6 +20,7 @@ from modules.logger import setup_logging
 from modules.layout import create_layout
 from modules.callbacks import register_callbacks
 from modules.data_fetcher import DataFetcher, FALLBACK_COUNTRIES, FIRMSAPIError
+from modules.simulation import FireSpreadSimulator, SimulationConfig
 
 # Initialize logging
 logger = setup_logging(__name__)
@@ -76,7 +77,7 @@ def create_app(debug: bool = False) -> dash.Dash:
         """Get fire data for a given area."""
         lat = request.args.get("lat", type=float)
         lon = request.args.get("lon", type=float)
-        radius = request.args.get("radius", 40, type=float)
+        radius = request.args.get("radius", 200, type=float)
         source = request.args.get("source", "MODIS_NRT")
         days = request.args.get("days", 3, type=int)
         
@@ -92,7 +93,14 @@ def create_app(debug: bool = False) -> dash.Dash:
             df = fetcher.get_fire_data(boundary_str, source=source, day_range=days)
             
             if df.empty:
-                return jsonify({"message": "No fires found", "count": 0, "data": []})
+                return jsonify({
+                    "message": "No fires found in the specified area",
+                    "count": 0,
+                    "data": [],
+                    "bounds": bounds,
+                    "source": source,
+                    "tip": "Try selecting a different location or increasing the radius"
+                })
             
             fires = df.to_dict(orient="records")
             return jsonify({
@@ -116,8 +124,8 @@ def create_app(debug: bool = False) -> dash.Dash:
             return jsonify({"error": str(e)}), 400
     
     @server.route("/api/v1/analyze", methods=["POST", "OPTIONS"])
-    def analyze_fire():
-        """Analyze fire data for a given location and date."""
+    def analyze_location():
+        """Analyze a location for fire activity."""
         from modules.analysis_pipeline import run_analysis_pipeline
         
         data = request.get_json() or {}
@@ -125,7 +133,8 @@ def create_app(debug: bool = False) -> dash.Dash:
         lat = data.get("lat")
         lon = data.get("lon")
         date = data.get("date")
-        grid_size = data.get("grid_size", 128)
+        radius = data.get("radius", 100)
+        grid_size = data.get("grid_size", 64)
         
         if lat is None or lon is None:
             return jsonify({"error": "Missing required parameters", "required": ["lat", "lon"]}), 400
@@ -137,7 +146,17 @@ def create_app(debug: bool = False) -> dash.Dash:
                 api_key=Config.FIRMS_API_KEY,
                 grid_size=grid_size
             )
-            return jsonify({"status": "success", "stats": result["stats"]})
+            
+            # Include helpful message
+            if result['stats']['total_fires'] == 0:
+                result['message'] = "No fires detected in this area. Try a different location or use Load Example 1."
+            
+            return jsonify({
+                "status": "success",
+                "location": {"lat": lat, "lon": lon},
+                "stats": result['stats'],
+                "message": result.get('message', '')
+            })
         except Exception as e:
             logger.error(f"Analysis error: {e}")
             return jsonify({"error": str(e)}), 500
@@ -145,13 +164,11 @@ def create_app(debug: bool = False) -> dash.Dash:
     @server.route("/api/v1/simulate", methods=["POST", "OPTIONS"])
     def simulate_fire():
         """Run fire spread simulation."""
-        from modules.simulation import FireSpreadSimulator, SimulationConfig
-        
         data = request.get_json() or {}
         
         grid_size = data.get("grid_size", 7)
-        lambda_spread = data.get("lambda_spread", 0.005)
-        firefighters = data.get("firefighters", 1)
+        lambda_spread = data.get("lambda_spread", 0.1)
+        firefighters = data.get("firefighters", 2)
         strategy = data.get("strategy", "greedy")
         start_node = data.get("start_node", grid_size ** 2 // 2)
         
@@ -160,7 +177,7 @@ def create_app(debug: bool = False) -> dash.Dash:
             lambda_spread=lambda_spread,
             num_firefighters=firefighters,
             fire_start_nodes=[start_node],
-            seed=data.get("seed")
+            seed=data.get("seed", 42)
         )
         
         simulator = FireSpreadSimulator(config)
@@ -187,13 +204,11 @@ def create_app(debug: bool = False) -> dash.Dash:
     @server.route("/api/v1/compare", methods=["POST", "OPTIONS"])
     def compare_strategies():
         """Compare all firefighter placement strategies."""
-        from modules.simulation import FireSpreadSimulator, SimulationConfig
-        
         data = request.get_json() or {}
         
         grid_size = data.get("grid_size", 7)
-        lambda_spread = data.get("lambda_spread", 0.005)
-        firefighters = data.get("firefighters", 1)
+        lambda_spread = data.get("lambda_spread", 0.1)
+        firefighters = data.get("firefighters", 2)
         start_node = data.get("start_node", grid_size ** 2 // 2)
         
         config = SimulationConfig(
@@ -201,7 +216,7 @@ def create_app(debug: bool = False) -> dash.Dash:
             lambda_spread=lambda_spread,
             num_firefighters=firefighters,
             fire_start_nodes=[start_node],
-            seed=data.get("seed")
+            seed=42
         )
         
         simulator = FireSpreadSimulator(config)
@@ -216,6 +231,7 @@ def create_app(debug: bool = False) -> dash.Dash:
             }
         
         return jsonify({
+            "status": "success",
             "configuration": {
                 "grid_size": grid_size,
                 "lambda": lambda_spread,
@@ -230,11 +246,41 @@ def create_app(debug: bool = False) -> dash.Dash:
         """Get available simulation parameters."""
         return jsonify({
             "grid_sizes": [3, 5, 7, 9],
-            "lambda_values": [0.001, 0.005, 0.01, 0.02, 0.05, 0.1],
-            "firefighters": list(range(1, 11)),
+            "lambda_values": [0.05, 0.1, 0.2, 0.3, 0.5],
+            "firefighters": list(range(1, 6)),
             "strategies": ["greedy", "random", "central"],
             "sources": ["MODIS_NRT", "VIIRS_NRT"]
         })
+    
+    @server.route("/api/v1/demo", methods=["GET", "OPTIONS"])
+    def get_demo():
+        """Get demo fire data for Australia."""
+        try:
+            fetcher = DataFetcher(Config.FIRMS_API_KEY)
+            df = fetcher.get_fire_data("110,-40,160,-10", source="MODIS_NRT", day_range=3)
+            
+            if df.empty:
+                # Return some sample data if API is empty
+                return jsonify({
+                    "status": "demo",
+                    "message": "No live data available, showing demo data",
+                    "data": [
+                        {"latitude": -21.0, "longitude": 116.8, "brightness": 326, "frp": 50},
+                        {"latitude": -35.6, "longitude": 138.1, "brightness": 355, "frp": 135},
+                        {"latitude": -26.4, "longitude": 126.3, "brightness": 397, "frp": 75},
+                    ]
+                })
+            
+            # Return sample of fires
+            sample = df.head(20).to_dict(orient="records")
+            return jsonify({
+                "status": "demo",
+                "message": f"Showing {len(sample)} of {len(df)} total fires",
+                "data": sample,
+                "total_fires": len(df)
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     
     # ========== DASH APP ==========
     

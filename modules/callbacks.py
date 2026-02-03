@@ -5,120 +5,24 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 from dash import no_update
-import geopandas
 
 from .data_fetcher import get_fire_data, get_country_list
-from .analysis_pipeline import run_analysis_pipeline
-from .plotly_visuals import create_grid_heatmap
-
-def create_fire_network_from_center(center_lat, center_lon, all_fire_lats, all_fire_lons, max_distance=0.1):
-    """Creates a network graph starting from a center fire point."""
-    try:
-        center_lat = float(center_lat)
-        center_lon = float(center_lon)
-        all_fire_lats = list(all_fire_lats) if all_fire_lats is not None else []
-        all_fire_lons = list(all_fire_lons) if all_fire_lons is not None else []
-        
-        if len(all_fire_lats) != len(all_fire_lons):
-            return {'edges': []}
-        
-        edges = []
-        for i in range(len(all_fire_lats)):
-            try:
-                fire_lat = float(all_fire_lats[i])
-                fire_lon = float(all_fire_lons[i])
-                distance = ((fire_lat - center_lat) ** 2 + (fire_lon - center_lon) ** 2) ** 0.5
-                
-                if distance <= max_distance and distance > 0:
-                    edges.append({
-                        'lat': [center_lat, fire_lat],
-                        'lon': [center_lon, fire_lon]
-                    })
-            except (IndexError, TypeError, ValueError):
-                continue
-        
-        return {'edges': edges}
-        
-    except Exception as e:
-        return {'edges': []}
-
-def create_fire_grid_graph(fire_lats, fire_lons, max_distance=0.1):
-    """Creates a grid graph using fire points as nodes."""
-    try:
-        fire_lats = list(fire_lats) if fire_lats is not None else []
-        fire_lons = list(fire_lons) if fire_lons is not None else []
-        
-        if len(fire_lats) != len(fire_lons) or len(fire_lats) < 2:
-            return {'edges': []}
-        
-        edges = []
-        for i in range(len(fire_lats)):
-            for j in range(i + 1, len(fire_lats)):
-                try:
-                    lat1, lon1 = float(fire_lats[i]), float(fire_lons[i])
-                    lat2, lon2 = float(fire_lats[j]), float(fire_lons[j])
-                    distance = ((lat2 - lat1) ** 2 + (lon2 - lon1) ** 2) ** 0.5
-                    
-                    if distance <= max_distance:
-                        edges.append({
-                            'lat': [lat1, lat2],
-                            'lon': [lon1, lon2]
-                        })
-                except (IndexError, TypeError, ValueError):
-                    continue
-        
-        return {'edges': edges}
-    except Exception as e:
-        return {'edges': []}
-
-def create_grid_graph(bounds, grid_size=8):
-    """Creates a grid graph overlay for the map."""
-    west, south, east, north = bounds
-    lat_step = (north - south) / grid_size
-    lon_step = (east - west) / grid_size
-    
-    node_lats, node_lons, node_texts = [], [], []
-    
-    for row in range(grid_size):
-        for col in range(grid_size):
-            lat = south + row * lat_step + lat_step / 2
-            lon = west + col * lon_step + lon_step / 2
-            node_id = row * grid_size + col
-            node_lats.append(lat)
-            node_lons.append(lon)
-            node_texts.append(f"Node {node_id}")
-    
-    edges = []
-    for row in range(grid_size):
-        for col in range(grid_size):
-            node = row * grid_size + col
-            if col < grid_size - 1:
-                edges.append({
-                    'lat': [node_lats[node], node_lats[node + 1]],
-                    'lon': [node_lons[node], node_lons[node + 1]]
-                })
-            if row < grid_size - 1:
-                edges.append({
-                    'lat': [node_lats[node], node_lats[node + grid_size]],
-                    'lon': [node_lons[node], node_lons[node + grid_size]]
-                })
-    
-    return {'lats': node_lats, 'lons': node_lons, 'texts': node_texts, 'edges': edges}
+from .simulation import FireSpreadSimulator, SimulationConfig
 
 def register_callbacks(app, api_key):
     """Register all Dash callbacks."""
     
-    # Initial fire map
+    # 1. Update fire map when country selected
     @app.callback(
-        Output('fire-map', 'figure'),
-        Output('map-status-message', 'children'),
-        Input('country-dropdown', 'value'),
-        Input('analysis-date-picker', 'date'),
-        prevent_initial_call=True
+        [Output('fire-map', 'figure'),
+         Output('map-status-message', 'children'),
+         Output('analyze-button', 'disabled')],
+        [Input('country-dropdown', 'value'),
+         Input('analysis-date-picker', 'date')]
     )
     def update_fire_map(country, date):
         if not country:
-            return go.Figure(), "Select a country to view fires."
+            return go.Figure(), "Select a country to view fires.", True
         
         try:
             country_df = get_country_list()
@@ -130,350 +34,372 @@ def register_callbacks(app, api_key):
             
             fig = go.Figure()
             
+            # Center of the country
+            center_lat = (south + north) / 2
+            center_lon = (west + east) / 2
+            
             if not df.empty:
                 fig.add_trace(go.Scattermapbox(
                     lat=df['latitude'],
                     lon=df['longitude'],
                     mode='markers',
-                    marker=dict(size=8, color='red'),
-                    text=df.apply(lambda r: f"Lat: {r['latitude']:.2f}, Lon: {r['longitude']:.2f}<br>Brightness: {r.get('brightness', 'N/A')}K", axis=1),
+                    marker=dict(size=10, color='red', opacity=0.7),
+                    text=[f"🔥 {row['latitude']:.2f}, {row['longitude']:.2f}<br>Brightness: {row.get('brightness', 'N/A')}K" 
+                         for _, row in df.iterrows()],
+                    hoverinfo='text',
                     name='Active Fires'
                 ))
+                
+                status = f"✅ Found {len(df)} active fires in {country}"
+            else:
+                status = f"⚠️ No fires detected in {country} (last 24h)"
             
             fig.update_layout(
                 mapbox_style="open-street-map",
                 mapbox=dict(
-                    center=dict(lat=(south + north) / 2, lon=(west + east) / 2),
-                    zoom=4
+                    center=dict(lat=center_lat, lon=center_lon),
+                    zoom=country == 'AU' and 3 or 4
                 ),
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=600
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=480,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
-            status = f"Showing {len(df)} fires" if not df.empty else "No fires detected in this area"
-            return fig, status
+            return fig, status, False
             
         except Exception as e:
-            return go.Figure(), f"Error: {str(e)}"
+            return go.Figure(), f"❌ Error: {str(e)}", True
     
-    # Toggle grid graph
+    # 2. Handle fire point click
     @app.callback(
-        Output('grid-toggle-state', 'data'),
-        Output('grid-toggle-button', 'children'),
-        Output('fire-map', 'figure', allow_duplicate=True),
-        Output('selected-firefighter-stations', 'data', allow_duplicate=True),
-        Output('latest-saved-file', 'data', allow_duplicate=True),
-        Output('save-graph-button', 'disabled', allow_duplicate=True),
-        Output('run-mff-button', 'disabled', allow_duplicate=True),
-        Input('grid-toggle-button', 'n_clicks'),
-        State('grid-toggle-state', 'data'),
-        State('fire-map', 'figure'),
-        State('country-dropdown', 'value'),
-        State('selected-fire-point', 'data'),
-        State('grid-graph-size-dropdown', 'value'),
-        State('grid-spacing-dropdown', 'value'),
-        State('map-zoom-dropdown', 'value'),
-        State('selected-firefighter-stations', 'data'),
-        prevent_initial_call=True
+        [Output('selection-status', 'children'),
+         Output('selected-fire-point', 'data')],
+        [Input('fire-map', 'clickData')]
     )
-    def toggle_grid_graph(n_clicks, grid_on, fig, country, selected_point, grid_size, spacing, zoom, stations):
-        if not n_clicks or n_clicks % 2 == 0:
-            new_grid_on = True
-            button_text = "Hide Grid Graph"
-        else:
-            new_grid_on = False
-            button_text = "Show Grid Graph"
-        
-        if new_grid_on and selected_point and country:
-            try:
-                country_df = get_country_list()
-                bbox = country_df[country_df['abreviation'] == country]['bbox_coords'].values[0]
-                west, south, east, north = map(float, bbox.split(','))
-                
-                grid_data = create_grid_graph((west, south, east, north), grid_size)
-                
-                fig = go.Figure(fig)
-                
-                # Add grid nodes
-                fig.add_trace(go.Scattermapbox(
-                    lat=grid_data['lats'],
-                    lon=grid_data['lons'],
-                    mode='markers+text',
-                    marker=dict(size=12, color='blue'),
-                    text=grid_data['texts'],
-                    name='Grid Nodes',
-                    hoverinfo='text'
-                ))
-                
-                # Add grid edges
-                for edge in grid_data['edges']:
-                    fig.add_trace(go.Scattermapbox(
-                        lat=edge['lat'],
-                        lon=edge['lon'],
-                        mode='lines',
-                        line=dict(color='blue', width=1),
-                        name='Grid Lines',
-                        showlegend=False
-                    ))
-                
-                # Re-add fire points
-                country_df = get_country_list()
-                bbox = country_df[country_df['abreviation'] == country]['bbox_coords'].values[0]
-                west, south, east, north = map(float, bbox.split(','))
-                boundary_str = f"{west},{south},{east},{north}"
-                df = get_fire_data(api_key, boundary_str)
-                
-                if not df.empty:
-                    fig.add_trace(go.Scattermapbox(
-                        lat=df['latitude'],
-                        lon=df['longitude'],
-                        mode='markers',
-                        marker=dict(size=8, color='red'),
-                        name='Active Fires'
-                    ))
-                
-                fig.update_layout(
-                    mapbox=dict(center=dict(lat=(south + north) / 2, lon=(west + east) / 2), zoom=zoom)
-                )
-                
-                return new_grid_on, button_text, fig, [], None, True, True
-                
-            except Exception as e:
-                return grid_on, button_text, fig, stations, None, True, True
-        
-        return new_grid_on, button_text, fig, stations, None, True, True
-    
-    # Handle fire point selection
-    @app.callback(
-        Output('fire-map', 'figure', allow_duplicate=True),
-        Output('selection-status', 'children', allow_duplicate=True),
-        Output('analyze-button', 'disabled', allow_duplicate=True),
-        Output('save-graph-button', 'disabled', allow_duplicate=True),
-        Output('selected-fire-point', 'data'),
-        Output('selected-firefighter-stations', 'data'),
-        Input('fire-map', 'clickData'),
-        State('fire-map', 'figure'),
-        State('selected-firefighter-stations', 'data'),
-        State('grid-spacing-dropdown', 'value'),
-        State('map-zoom-dropdown', 'value'),
-        prevent_initial_call=True
-    )
-    def handle_fire_point_click(clickData, fig, stations, spacing, zoom):
+    def handle_click(clickData):
         if clickData is None:
-            return no_update, "No point selected.", True, True, None, stations
+            return "👆 Click a fire point to select it", None
         
         point = clickData['points'][0]
         lat, lon = point['lat'], point['lon']
         
-        status = f"Selected: ({lat:.4f}, {lon:.4f})"
-        
-        return no_update, status, False, False, {'lat': lat, 'lon': lon}, []
+        return f"📍 Selected: {lat:.4f}, {lon:.4f}", {'lat': lat, 'lon': lon}
     
-    # Enable buttons when data ready
-    @app.callback(
-        Output('save-graph-button', 'disabled'),
-        Output('run-mff-button', 'disabled'),
-        Input('selected-fire-point', 'data'),
-        Input('selected-firefighter-stations', 'data'),
-        Input('latest-saved-file', 'data'),
-        Input('grid-toggle-state', 'data'),
-    )
-    def update_button_states(selected_point, stations, saved_file, grid_on):
-        if selected_point and grid_on:
-            return False, False
-        return True, True
-    
-    # Update map with firefighter stations
-    @app.callback(
-        Output('fire-map', 'figure', allow_duplicate=True),
-        Input('selected-firefighter-stations', 'data'),
-        State('fire-map', 'figure'),
-        State('grid-toggle-state', 'data'),
-        prevent_initial_call=True
-    )
-    def update_map_with_stations(stations, fig, grid_on):
-        if not grid_on or not stations or not fig:
-            return no_update
-        
-        fig = go.Figure(fig)
-        
-        # Add firefighter stations
-        station_lats, station_lons = zip(*stations) if stations else ([], [])
-        
-        fig.add_trace(go.Scattermapbox(
-            lat=station_lats,
-            lon=station_lons,
-            mode='markers',
-            marker=dict(size=15, color='green', symbol='star'),
-            name='Firefighter Stations'
-        ))
-        
-        return fig
-    
-    # Run analysis
+    # 3. Run Analysis
     @app.callback(
         Output('results-output', 'children'),
         Input('analyze-button', 'n_clicks'),
         State('selected-fire-point', 'data'),
-        State('analysis-date-picker', 'date'),
+        State('country-dropdown', 'value'),
         prevent_initial_call=True
     )
-    def run_analysis(n_clicks, selected_point, selected_date):
+    def run_analysis(n_clicks, selected_point, country):
         if not selected_point:
-            return dbc.Alert("⚠️ Please select a fire point on the map first.", color="warning")
+            return dbc.Alert("⚠️ Please select a fire point first!", color="warning")
         
         lat, lon = selected_point['lat'], selected_point['lon']
         
         try:
-            results = run_analysis_pipeline(lat, lon, selected_date, api_key, grid_size=64)
-            stats = results['stats']
+            # Get country info
+            country_df = get_country_list()
+            country_name = country
+            for _, row in country_df.iterrows():
+                if row['abreviation'] == country:
+                    country_name = row['name']
+                    break
             
-            # Check if there's fire data
-            if stats['total_fires'] == 0:
-                return dbc.Alert([
-                    html.H5("📭 No Fire Data Found"),
-                    html.P(f"No active fires detected near ({lat:.2f}, {lon:.2f})"),
-                    html.Hr(),
-                    html.P("Try selecting a different point on the map, or choose a region with known fire activity."),
-                    html.P("💡 Tip: Australia currently has active fires. Select Australia first, then click on a fire point."),
-                ], color="info", className="mt-3")
+            # Fetch fire data for region
+            bbox = country_df[country_df['abreviation'] == country]['bbox_coords'].values[0]
+            west, south, east, north = map(float, bbox.split(','))
+            boundary_str = f"{west},{south},{east},{north}"
+            df = get_fire_data(api_key, boundary_str)
             
-            stats_display = dbc.Card([
-                dbc.CardHeader("Grid Statistics"),
+            # Count fires
+            total_fires = len(df) if not df.empty else 0
+            
+            # Calculate region stats
+            region_area = (east - west) * (north - south) * 111 * 111  # Approximate km²
+            
+            # Find fires near selected point
+            if not df.empty:
+                df['distance'] = ((df['latitude'] - lat)**2 + (df['longitude'] - lon)**2)**0.5
+                nearby = df[df['distance'] < 2.0]
+                nearby_fires = len(nearby)
+                
+                if not nearby.empty:
+                    avg_brightness = nearby['brightness'].mean()
+                    max_brightness = nearby['brightness'].max()
+                    total_frp = nearby['frp'].sum() if 'frp' in nearby else 0
+                else:
+                    avg_brightness = df['brightness'].mean() if not df.empty else 0
+                    max_brightness = df['brightness'].max() if not df.empty else 0
+                    total_frp = df['frp'].sum() if 'frp' in df else 0
+            else:
+                nearby_fires = 0
+                avg_brightness = 0
+                max_brightness = 0
+                total_frp = 0
+            
+            return dbc.Card([
+                dbc.CardHeader([
+                    html.H5("🔥 Fire Analysis Results", className="mb-0"),
+                    html.Span(f" {country_name}", className="badge bg-secondary ms-2")
+                ]),
                 dbc.CardBody([
-                    html.P(f"Grid Size: {stats['grid_size']}"),
-                    html.P(f"Cell Size: {stats['cell_size_km']}"),
-                    html.P(f"Total Fires: {stats['total_fires']}"),
-                    html.P(f"Cells with Fire: {stats['cells_with_fire']}"),
+                    dbc.Row([
+                        dbc.Col([
+                            html.H3(str(total_fires), className="text-danger mb-0"),
+                            html.P("Total Fires in Region", className="text-muted small mb-0")
+                        ], width=3, className="text-center"),
+                        dbc.Col([
+                            html.H3(str(nearby_fires), className="text-warning mb-0"),
+                            html.P("Fires Near Selected", className="text-muted small mb-0")
+                        ], width=3, className="text-center"),
+                        dbc.Col([
+                            html.H3(f"{avg_brightness:.0f}K", className="text-info mb-0"),
+                            html.P("Avg Brightness", className="text-muted small mb-0")
+                        ], width=3, className="text-center"),
+                        dbc.Col([
+                            html.H3(f"{total_frp:.0f} MW", className="text-success mb-0"),
+                            html.P("Total FRP", className="text-muted small mb-0")
+                        ], width=3, className="text-center"),
+                    ], className="mb-3"),
+                    html.Hr(),
+                    html.P([
+                        html.Strong("Selected Location: "),
+                        f"{lat:.4f}°S, {abs(lon):.4f}°E"
+                    ]),
+                    html.P([
+                        html.Strong("Region Area: "),
+                        f"~{region_area:,.0f} km²"
+                    ], className="small text-muted"),
+                    total_fires > 0 and html.P([
+                        "💡 ", html.Strong(f"{nearly_fires} fires"), 
+                        " detected within 2° of selected point"
+                    ]) or html.P([
+                        "⚠️ No fires near selected point. Try selecting a different location ",
+                        "or use the Demo button."
+                    ], className="small"),
                 ])
-            ], className="mb-3")
-            
-            return stats_display
+            ], className="shadow-sm mt-3")
             
         except Exception as e:
-            return dbc.Alert(f"Analysis failed: {e}", color="danger")
+            return dbc.Alert(f"❌ Analysis failed: {e}", color="danger")
     
-    # Save graph data
-    @app.callback(
-        Output('save-graph-button', 'disabled'),
-        Output('selection-status', 'children', allow_duplicate=True),
-        Output('latest-saved-file', 'data'),
-        Output('run-mff-button', 'disabled'),
-        Input('save-graph-button', 'n_clicks'),
-        State('fire-map', 'figure'),
-        State('selected-fire-point', 'data'),
-        prevent_initial_call=True
-    )
-    def save_graph_data(n_clicks, fig, selected_point):
-        if not n_clicks or not selected_point:
-            return True, "No point selected.", None, True
-        
-        return False, f"Saved: {selected_point}", "saved", False
-    
-    # Run MFF solver
+    # 4. Run Simulation
     @app.callback(
         Output('results-output', 'children', allow_duplicate=True),
-        Input('run-mff-button', 'n_clicks'),
-        State('selected-firefighter-stations', 'data'),
+        Input('simulate-button', 'n_clicks'),
+        State('grid-graph-size-dropdown', 'value'),
+        State('lambda-dropdown', 'value'),
+        State('firefighters-dropdown', 'value'),
         prevent_initial_call=True
     )
-    def run_mff_solver(n_clicks, stations):
+    def run_simulation(n_clicks, grid_size, lambda_val, firefighters):
         if not n_clicks:
             return no_update
         
-        if not stations or len(stations) < 2:
-            return dbc.Alert("⚠️ Select at least 2 firefighter stations on the grid.", color="warning")
+        # Run simulation
+        config = SimulationConfig(
+            grid_size=grid_size,
+            lambda_spread=lambda_val,
+            num_firefighters=firefighters,
+            fire_start_nodes=[grid_size**2 // 2],  # Center
+            seed=42
+        )
         
-        return dbc.Alert([
-            html.H5("🧯 MFF Optimization"),
-            html.P(f"Optimizing firefighter deployment for {len(stations)} stations..."),
-            html.P("This would invoke the SCIP/MIQCP solver here."),
-        ], color="success")
+        simulator = FireSpreadSimulator(config)
+        result = simulator.run(firefighter_strategy="greedy")
+        
+        # Calculate protection percentage
+        total_nodes = grid_size ** 2
+        protection_pct = (result.total_protected / total_nodes) * 100
+        burn_pct = (result.total_burned / total_nodes) * 100
+        
+        # ASCII visualization
+        grid = simulator.get_grid_visualization()
+        ascii_lines = []
+        for row in range(grid_size):
+            line = ""
+            for col in range(grid_size):
+                idx = row * grid_size + col
+                if idx in result.firefighter_placements.values():
+                    line += "🛡️"
+                elif idx in result.burned_nodes:
+                    line += "⬛"
+                elif idx in simulator.burning:
+                    line += "🔥"
+                else:
+                    line += "░"
+            ascii_lines.append(line)
+        
+        return dbc.Card([
+            dbc.CardHeader([
+                html.H5("🧯 Fire Spread Simulation", className="mb-0 d-inline"),
+                html.Span(f" {grid_size}×{grid_size} grid", className="badge bg-secondary ms-2")
+            ]),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.H3(str(result.total_burned), className="text-danger"),
+                        html.P("Burned Nodes", className="small text-muted")
+                    ], className="text-center"),
+                    dbc.Col([
+                        html.H3(str(result.total_protected), className="text-success"),
+                        html.P("Protected", className="small text-muted")
+                    ], className="text-center"),
+                    dbc.Col([
+                        html.H3(f"{burn_pct:.0f}%", className="text-danger"),
+                        html.P("Burned %", className="small text-muted")
+                    ], className="text-center"),
+                    dbc.Col([
+                        html.H3(f"{protection_pct:.0f}%", className="text-success"),
+                        html.P("Protected %", className="small text-muted")
+                    ], className="text-center"),
+                ], className="mb-3"),
+                html.Hr(),
+                html.Pre("\n".join(ascii_lines), className="text-center font-monospace small mb-2"),
+                html.P([
+                    "Legend: ", html.Span("🔥", className="text-danger"), "=Burning  ",
+                    html.Span("⬛", className="text-dark"), "=Burned  ",
+                    html.Span("🛡️", className="text-success"), "=Protected  ",
+                    html.Span("░", className="text-muted"), "=Safe"
+                ], className="small text-center"),
+                html.Hr(),
+                html.P([
+                    html.Strong("Parameters: "),
+                    f"λ={lambda_val}, {firefighters} firefighters, strategy=greedy"
+                ], className="small text-muted")
+            ])
+        ], className="shadow-sm mt-3")
     
-    # Load example 1
+    # 5. Compare Strategies
     @app.callback(
-        Output('fire-map', 'figure', allow_duplicate=True),
-        Output('selection-status', 'children', allow_duplicate=True),
-        Output('selected-fire-point', 'data'),
-        Output('selected-firefighter-stations', 'data'),
-        Input('load-example-1-button', 'n_clicks'),
+        Output('results-output', 'children', allow_duplicate=True),
+        Input('compare-button', 'n_clicks'),
+        State('grid-graph-size-dropdown', 'value'),
+        State('lambda-dropdown', 'value'),
         prevent_initial_call=True
     )
-    def load_example_1(n_clicks):
+    def compare_strategies(n_clicks, grid_size, lambda_val):
         if not n_clicks:
             return no_update
         
-        # Australia example
-        lat, lon = -25.0, 133.0
+        # Run comparison
+        config = SimulationConfig(
+            grid_size=grid_size,
+            lambda_spread=lambda_val,
+            num_firefighters=2,
+            fire_start_nodes=[grid_size**2 // 2],
+            seed=42
+        )
+        
+        simulator = FireSpreadSimulator(config)
+        comparison = simulator.compare_strategies()
+        
+        # Find best strategy
+        best = min(comparison.keys(), key=lambda s: comparison[s].total_burned)
+        best_result = comparison[best]
+        
+        # Build comparison table
+        rows = []
+        for strategy, res in comparison.items():
+            is_best = strategy == best
+            rows.append(
+                dbc.Row([
+                    dbc.Col([
+                        html.Strong(strategy.capitalize()),
+                        is_best and html.Badge(" BEST", "bg-success ms-2") or ""
+                    ], width=4),
+                    dbc.Col(f"{res.total_burned} burned", width=3),
+                    dbc.Col(f"{res.total_protected} protected", width=3),
+                    dbc.Col(f"{res.time_steps} steps", width=2),
+                ], className=f"py-2 {'bg-success bg-opacity-10' if is_best else ''}")
+            )
+        
+        return dbc.Card([
+            dbc.CardHeader("📊 Strategy Comparison"),
+            dbc.CardBody([
+                html.P([
+                    html.Strong("Configuration: "),
+                    f"{grid_size}×{grid_size} grid, λ={lambda_val}, 2 firefighters"
+                ], className="small text-muted"),
+                html.Hr(),
+                dbc.Row([
+                    dbc.Col(html.Strong("Strategy"), width=4),
+                    dbc.Col("Burned", width=3),
+                    dbc.Col("Protected", width=3),
+                    dbc.Col("Steps", width=2),
+                ], className="fw-bold border-bottom pb-2"),
+                html.Div(rows, className="mt-2"),
+                html.Hr(),
+                dbc.Alert([
+                    html.H6("💡 Recommendation", className="mb-1"),
+                    f"The {best.capitalize()} strategy minimizes burned nodes ({best_result.total_burned}). ",
+                    "This strategy protects high-degree nodes to block fire spread."
+                ], color="success", className="mb-0")
+            ])
+        ], className="shadow-sm mt-3")
+    
+    # 6. Demo Button - Load Australia with fires
+    @app.callback(
+        [Output('fire-map', 'figure', allow_duplicate=True),
+         Output('selection-status', 'children', allow_duplicate=True),
+         Output('selected-fire-point', 'data', allow_duplicate=True),
+         Output('country-dropdown', 'value', allow_duplicate=True)],
+        Input('demo-button', 'n_clicks'),
+        prevent_initial_call=True
+    )
+    def load_demo(n_clicks):
+        if not n_clicks:
+            return no_update, no_update, no_update, no_update
         
         try:
-            country_df = get_country_list()
-            bbox = country_df[country_df['abreviation'] == 'AU']['bbox_coords'].values[0]
-            west, south, east, north = map(float, bbox.split(','))
+            # Fetch Australia fires
+            df = get_fire_data(api_key, "110,-40,160,-10", day_range=3)
+            
+            if df.empty:
+                # Use sample data
+                sample_data = [
+                    {"latitude": -21.0, "longitude": 116.8, "brightness": 326, "frp": 50},
+                    {"latitude": -35.6, "longitude": 138.1, "brightness": 355, "frp": 135},
+                    {"latitude": -26.4, "longitude": 126.3, "brightness": 397, "frp": 75},
+                ]
+                df = pd.DataFrame(sample_data)
             
             fig = go.Figure()
             
-            df = get_fire_data(api_key, f"{west},{south},{east},{north}")
+            # Add all fires
+            fig.add_trace(go.Scattermapbox(
+                lat=df['latitude'],
+                lon=df['longitude'],
+                mode='markers',
+                marker=dict(size=10, color='red', opacity=0.7),
+                text=[f"🔥 {row['latitude']:.2f}°, {row['longitude']:.2f}°\nBrightness: {row.get('brightness', 'N/A')}K" 
+                     for _, row in df.iterrows()],
+                hoverinfo='text',
+                name=f'Active Fires ({len(df)})'
+            ))
             
-            if not df.empty:
-                fig.add_trace(go.Scattermapbox(
-                    lat=df['latitude'],
-                    lon=df['longitude'],
-                    mode='markers',
-                    marker=dict(size=8, color='red'),
-                    name='Active Fires'
-                ))
+            # Pre-select a fire point (first one)
+            selected_lat = df.iloc[0]['latitude']
+            selected_lon = df.iloc[0]['longitude']
             
             fig.update_layout(
                 mapbox_style="open-street-map",
                 mapbox=dict(center=dict(lat=-25, lon=133), zoom=4),
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=600
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=480,
+                showlegend=True
             )
             
-            return fig, f"Example: Australia ({lat}, {lon})", {'lat': lat, 'lon': lon}, []
-            
-        except Exception as e:
-            return no_update, f"Error: {e}", None, []
-    
-    # Load example 2
-    @app.callback(
-        Output('fire-map', 'figure', allow_duplicate=True),
-        Output('selection-status', 'children', allow_duplicate=True),
-        Output('selected-fire-point', 'data'),
-        Output('selected-firefighter-stations', 'data'),
-        Input('load-example-2-button', 'n_clicks'),
-        prevent_initial_call=True
-    )
-    def load_example_2(n_clicks):
-        if not n_clicks:
-            return no_update
-        
-        # USA example
-        lat, lon = 36.0, -119.0
-        
-        try:
-            fig = go.Figure()
-            
-            df = get_fire_data(api_key, "-125,30,-100,50")
-            
-            if not df.empty:
-                fig.add_trace(go.Scattermapbox(
-                    lat=df['latitude'],
-                    lon=df['longitude'],
-                    mode='markers',
-                    marker=dict(size=8, color='red'),
-                    name='Active Fires'
-                ))
-            
-            fig.update_layout(
-                mapbox_style="open-street-map",
-                mapbox=dict(center=dict(lat=36, lon=-119), zoom=5),
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=600
+            return (
+                fig,
+                f"📍 Demo: Selected (-21.0, 116.8)",
+                {'lat': selected_lat, 'lon': selected_lon},
+                'AU'
             )
             
-            return fig, f"Example: USA ({lat}, {lon})", {'lat': lat, 'lon': lon}, []
-            
         except Exception as e:
-            return no_update, f"Error: {e}", None, []
+            return no_update, f"Error: {e}", no_update, no_update
