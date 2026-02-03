@@ -175,7 +175,7 @@ def register_callbacks(app, api_key):
                         f"~{region_area:,.0f} km²"
                     ], className="small text-muted"),
                     total_fires > 0 and html.P([
-                        "💡 ", html.Strong(f"{nearly_fires} fires"), 
+                        "💡 ", html.Strong(f"{nearby_fires} fires"), 
                         " detected within 2° of selected point"
                     ]) or html.P([
                         "⚠️ No fires near selected point. Try selecting a different location ",
